@@ -10,7 +10,6 @@ st.title("🏢 해링턴 플레이스 사전점검 리스트")
 # 데이터 로드
 @st.cache_data
 def load_data():
-    # 엑셀 파일은 깃허브 저장소 루트에 있다고 가정
     return pd.read_excel("해링턴_사전점검_사진포함_최종.xlsx", sheet_name='Sheet1')
 
 try:
@@ -30,14 +29,15 @@ try:
             st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
             st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
             
-            # 사진 불러오기 (깃허브의 photos 폴더에 사진들이 있다고 가정)
+            # 💡 사진 불러오기 (폴더 없이 저장소에 바로 있다고 가정)
             file_name = str(row['저장된사진파일명']).strip()
-            img_path = f"photos/{file_name}"
             
-            if os.path.exists(img_path):
-                st.image(img_path, use_container_width=True)
+            # 파일이 있는지 체크
+            if os.path.exists(file_name):
+                st.image(file_name, use_container_width=True)
             else:
-                st.warning(f"사진을 찾을 수 없습니다: {file_name}")
+                # 파일이 없으면 깃허브에 파일이 올라갔는지 확인이 필요함
+                st.warning(f"사진 파일을 찾을 수 없습니다: {file_name}")
             
             st.divider()
 
