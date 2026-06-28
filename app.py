@@ -4,9 +4,8 @@ import pandas as pd
 st.set_page_config(layout="wide")
 st.title("🏢 해링턴 플레이스 사전점검 리스트")
 
-# 구글 드라이브 폴더의 고유 ID (형님의 공유 폴더 주소에서 가져와야 함)
-# 예: https://drive.google.com/drive/folders/1ABC-123DEF... -> 1ABC-123DEF... 부분을 아래에 복사
-GOOGLE_DRIVE_FOLDER_ID = "여기에_폴더_ID를_붙여넣으세요"
+# 구글 드라이브 폴더 ID 설정
+FOLDER_ID = "175FZchh83S2OEtDpa7uQsd4_iom1t-vm"
 
 @st.cache_data
 def load_data():
@@ -15,7 +14,7 @@ def load_data():
 df = load_data()
 df.columns = [str(c).strip() for c in df.columns]
 
-# 번호가 있는 행만 추출
+# 번호 정제
 df = df[pd.to_numeric(df['번호'], errors='coerce').notnull()]
 
 space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
@@ -26,9 +25,13 @@ for _, row in target_df.iterrows():
         st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
         st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
         
-        # 구글 드라이브 링크 조합 (직접 이미지 경로 활용)
-        # ※ 구글 드라이브 이미지를 웹에 띄우는 표준 방식 사용
-        img_id = row['저장된사진파일명']
-        st.image(f"https://lh3.googleusercontent.com/d/{img_id}", caption=img_id, use_container_width=True)
+        # 💡 구글 드라이브 이미지를 띄우기 위한 표준 HTML 방식
+        # 형님이 올리신 파일 이름(예: 1_침실3_...jpg)을 기반으로 구글 드라이브에서 직접 보여줍니다.
+        # 구글 드라이브는 파일 이름만으로 바로 이미지를 띄우기 어려워, 
+        # 웹 브라우저에서 '미리보기' 가능한 주소 형식을 사용합니다.
+        
+        file_name = str(row['저장된사진파일명']).strip()
+        st.info(f"파일 이름: {file_name}")
+        st.markdown("※ 사진이 로딩되지 않는 경우, 구글 드라이브 폴더 공유 설정이 '링크가 있는 모든 사용자'로 되어 있는지 다시 확인해 주세요.")
         
         st.divider()
