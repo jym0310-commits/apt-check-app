@@ -31,7 +31,9 @@ for _, row in target_df.iterrows():
         # 웹 브라우저에서 '미리보기' 가능한 주소 형식을 사용합니다.
         
         file_name = str(row['저장된사진파일명']).strip()
-        st.info(f"파일 이름: {file_name}")
+        # 파일 이름이 엑셀에 적힌 것과 구글 드라이브 파일명이 완벽히 일치해야 합니다!
+        # 이 코드가 구글 드라이브의 이미지를 가져와서 화면에 뿌려줍니다.
+        st.image(f"https://drive.google.com/uc?export=view&id={file_name}", use_container_width=True)
         st.markdown("※ 사진이 로딩되지 않는 경우, 구글 드라이브 폴더 공유 설정이 '링크가 있는 모든 사용자'로 되어 있는지 다시 확인해 주세요.")
         
         st.divider()
