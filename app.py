@@ -1,7 +1,21 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import os
 
+# 구글 시트 연결 설정
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+client = gspread.authorize(creds)
+
+@st.cache_data(ttl=60) # 1분마다 자동 새로고침
+def load_data():
+    sheet = client.open("하자관리시트이름").sheet1 # 구글 시트 이름 입력
+    data = sheet.get_all_records()
+    return pd.DataFrame(data)
+
+# ... [이후 코드 구조는 이전과 동일] ...
 # 페이지 설정
 st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
 
