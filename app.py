@@ -5,7 +5,7 @@ from google.oauth2.service_account import Credentials
 import os
 
 # 페이지 설정
-st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
+st.set_page_config(layout="wide", page_title="해링턴_사전점검_사진포함_최종_2606298")
 
 # CSS: 세련된 해링턴 테마
 st.markdown("""
@@ -28,7 +28,7 @@ def get_sheet():
     creds_with_scope = creds.with_scopes(scope)
     client = gspread.authorize(creds_with_scope)
     # 구글 시트 파일명을 정확히 입력하세요
-    return client.open("하자관리시트이름").sheet1
+    return client.open("해링턴_사전점검_사진포함_최종_2606298").sheet1
 
 sheet = get_sheet()
 
