@@ -3,63 +3,56 @@ import pandas as pd
 import os
 
 # 페이지 설정
-st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
+st.set_page_config(layout="wide", page_title="하자 관리 시스템")
 
-# CSS 스타일링
+# 전문가적인 웹 스타일 CSS 및 대시보드 스타일
 st.markdown("""
     <style>
-    .card { background: #ffffff; padding: 20px; border-radius: 15px; border-left: 10px solid #1B2845; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    .title-box { background-color: #1B2845; padding: 20px; border-radius: 10px; color: white; text-align: center; }
+    .main { background-color: #f5f7f9; }
+    .card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .metric-card { background: #ffffff; padding: 15px; border-radius: 10px; border-left: 5px solid #3498db; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    h3 { color: #2c3e50; }
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("<div class='title-box'><h1>🏢 해링턴 플레이스 하자 관리 대시보드</h1></div>", unsafe_allow_html=True)
+st.title("🏢 해링턴 플레이스 사전점검 리스트")
 
-# 1. 데이터 파일 업로드 기능 추가
-st.sidebar.header("데이터 업로드")
-uploaded_file = st.sidebar.file_uploader("하자 리스트 엑셀 파일을 업로드하세요", type=["xlsx", "csv"])
+# 데이터 로드
+@st.cache_data
+def load_data():
+    return pd.read_excel("해링턴_사전점검_사진포함_최종.xlsx", sheet_name='Sheet1')
 
-if uploaded_file is not None:
-    # 업로드된 파일 읽기
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-    
-    st.success("파일이 성공적으로 로드되었습니다!")
+df = load_data()
+df.columns = [str(c).strip() for c in df.columns]
+df = df[pd.to_numeric(df['번호'], errors='coerce').notnull()]
 
-    # 2. 대시보드 통계
-    if '진행현황' in df.columns:
-        status_counts = df['진행현황'].value_counts()
-        done = status_counts.get('완료', 0)
-        todo = len(df) - done
-    else:
-        done, todo = 0, len(df)
+# --- [상단 요약 대시보드] ---
+st.subheader("📊 전체 하자 요약 현황")
+m1, m2, m3 = st.columns(3)
+m1.metric("전체 하자 건수", f"{len(df)}건")
+m2.metric("공간 수", f"{len(df['공간'].unique())}곳")
+m3.metric("주요 유형", df['유형'].mode()[0])
+st.markdown("---")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("총 하자 건수", f"{len(df)}건")
-    col2.metric("완료 건수", f"{done}건")
-    col3.metric("미조치 건수", f"{todo}건")
+# 공간 필터링
+col1, col2 = st.columns([1, 4])
+with col1:
+    space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
 
-    # 3. 공간 필터링
-    space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
-    target_df = df if space == "전체" else df[df['공간'] == space]
+target_df = df if space == "전체" else df[df['공간'] == space]
 
-    # 4. 하자 리스트 출력
-    cols = st.columns(2)
-    for i, row in target_df.iterrows():
-        with cols[i % 2]:
-            status = row.get('진행현황', '미지정')
-            status_color = "#27ae60" if status == '완료' else "#e74c3c"
+# 그리드 출력 (PC 2열, 모바일 1열 자동 전환)
+cols = st.columns(2)
+for i, (index, row) in enumerate(target_df.iterrows()):
+    with cols[i % 2]:
+        with st.container():
+            st.markdown(f"<div class='card'>", unsafe_allow_html=True)
+            st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
+            st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
             
-            st.markdown(f"<div class='card' style='border-left-color: {status_color};'>", unsafe_allow_html=True)
-            st.subheader(f"🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
-            st.write(f"**상태:** {status} | **내용:** {row['상세내용']}")
-            
-            # 사진 표시 (파일명이 데이터에 포함되어 있다고 가정)
-            file_name = str(row.get('저장된사진파일명', '')).strip()
-            if file_name and os.path.exists(file_name):
+            file_name = str(row['저장된사진파일명']).strip()
+            if os.path.exists(file_name):
                 st.image(file_name, use_container_width=True)
+            else:
+                st.info(f"이미지 준비 중: {file_name}")
             st.markdown("</div>", unsafe_allow_html=True)
-else:
-    st.info("왼쪽 사이드바에서 하자 리스트 엑셀 파일을 업로드해 주세요.")
