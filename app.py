@@ -3,19 +3,30 @@ import pandas as pd
 import os
 
 # 페이지 설정
-st.set_page_config(layout="wide", page_title="하자 관리 시스템")
+st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
 
-# 전문가적인 웹 스타일 CSS 및 대시보드 스타일
+# 해링턴 플레이스 테마 적용 (CSS)
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    .metric-card { background: #ffffff; padding: 15px; border-radius: 10px; border-left: 5px solid #3498db; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    h3 { color: #2c3e50; }
+    .main { background-color: #f8f9fa; }
+    .stApp { max-width: 1200px; margin: 0 auto; }
+    .card { background: white; padding: 20px; border-radius: 12px; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 20px; }
+    .title-box { background-color: #1B2845; padding: 20px; border-radius: 10px; color: white; text-align: center; margin-bottom: 20px; }
+    h3 { color: #1B2845; }
+    .highlight { color: #C5A059; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🏢 해링턴 플레이스 사전점검 리스트")
+# 헤더
+st.markdown("<div class='title-box'><h1>🏢 해링턴 플레이스 사전점검 리스트</h1></div>", unsafe_allow_html=True)
+
+# 1. 평면도 섹션
+with st.expander("📍 위치 확인하기 (평면도 보기)", expanded=True):
+    # 'image_5012c2.jpg' 파일이 깃허브 루트에 있다고 가정
+    if os.path.exists("image_5012c2.jpg"):
+        st.image("image_5012c2.jpg", caption="세대 평면도", use_container_width=True)
+    else:
+        st.error("평면도 파일(image_5012c2.jpg)을 깃허브에 업로드해주세요.")
 
 # 데이터 로드
 @st.cache_data
@@ -26,22 +37,19 @@ df = load_data()
 df.columns = [str(c).strip() for c in df.columns]
 df = df[pd.to_numeric(df['번호'], errors='coerce').notnull()]
 
-# --- [상단 요약 대시보드] ---
-st.subheader("📊 전체 하자 요약 현황")
+# 통계 요약
 m1, m2, m3 = st.columns(3)
 m1.metric("전체 하자 건수", f"{len(df)}건")
-m2.metric("공간 수", f"{len(df['공간'].unique())}곳")
-m3.metric("주요 유형", df['유형'].mode()[0])
+m2.metric("점검 공간", len(df['공간'].unique()))
+m3.metric("최다 유형", df['유형'].mode()[0])
+
 st.markdown("---")
 
 # 공간 필터링
-col1, col2 = st.columns([1, 4])
-with col1:
-    space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
-
+space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
 target_df = df if space == "전체" else df[df['공간'] == space]
 
-# 그리드 출력 (PC 2열, 모바일 1열 자동 전환)
+# 리스트 출력
 cols = st.columns(2)
 for i, (index, row) in enumerate(target_df.iterrows()):
     with cols[i % 2]:
@@ -54,5 +62,5 @@ for i, (index, row) in enumerate(target_df.iterrows()):
             if os.path.exists(file_name):
                 st.image(file_name, use_container_width=True)
             else:
-                st.info(f"이미지 준비 중: {file_name}")
+                st.warning(f"이미지 없음: {file_name}")
             st.markdown("</div>", unsafe_allow_html=True)
