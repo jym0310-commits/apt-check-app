@@ -133,3 +133,112 @@ def build_as_docx(target_df):
     style_header_cell(t1.rows[0].cells[1], '매니저명')
     style_header_cell(t1.rows[0].cells[2], '전달사항')
     t1.rows[1].cells[2].text = f'미완료 하자 {len(target_df)}건 A/S 요청드립니다.'
+
+    doc.add_paragraph('')
+
+    # 동/호/임시키불/키불출/입주/전화 (각각 별도 컬럼으로 분리)
+    t2 = doc.add_table(rows=2, cols=6)
+    t2.style = 'Table Grid'
+    for i, label in enumerate(['동', '호', '임시키불', '키불출', '입주', '전화']):
+        style_header_cell(t2.rows[0].cells[i], label)
+
+    doc.add_paragraph('')
+
+    # 메인 리스트: NO / 실 / 내용(+사진) / 공종
+    t3 = doc.add_table(rows=1, cols=4)
+    t3.style = 'Table Grid'
+    for i, label in enumerate(['NO', '실', '내용', '공종']):
+        style_header_cell(t3.rows[0].cells[i], label)
+
+    widths = [Cm(1.3), Cm(2.5), Cm(11.0), Cm(2.3)]
+    for idx, w in enumerate(widths):
+        t3.rows[0].cells[idx].width = w
+
+    for _, row in target_df.iterrows():
+        cells = t3.add_row().cells
+        cells[0].text = str(row['번호'])
+        cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cells[1].text = str(row['공간'])
+        cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        content_cell = cells[2]
+        content_cell.paragraphs[0].text = f"{row['공간']} {row['부위']} / {row['유형']} - {row['상세내용']}"
+
+        photo_name = str(row.get('저장된사진파일명', '')).strip()
+        if photo_name and os.path.exists(photo_name):
+            p = content_cell.add_paragraph()
+            run = p.add_run()
+            try:
+                run.add_picture(photo_name, width=Cm(7.5))
+            except Exception:
+                p2 = content_cell.add_paragraph()
+                p2.add_run('(사진 삽입 실패)').italic = True
+        else:
+            p = content_cell.add_paragraph()
+            p.add_run('(사진 없음)').italic = True
+
+        cells[3].text = gongjong(row['부위'])
+        cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        for idx, w in enumerate(widths):
+            cells[idx].width = w
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+col_btn1, col_btn2 = st.columns([1, 3])
+with col_btn1:
+    generate_clicked = st.button("📄 AS신청서 출력")
+
+if generate_clicked:
+    todo_df = df[df['진행현황'].astype(str).str.strip() != '완료']
+    with st.spinner(f"미완료 {len(todo_df)}건으로 문서 생성 중..."):
+        docx_buf = build_as_docx(todo_df)
+    st.success(f"미완료 {len(todo_df)}건이 담긴 AS신청서가 준비됐습니다.")
+    st.download_button(
+        label="⬇️ AS신청서 다운로드 (.docx)",
+        data=docx_buf,
+        file_name="AS신청서_미완료.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+st.markdown("---")
+
+# --- 공간/상태 필터 및 리스트 ---
+with st.expander("🗺️ 공간 위치 확인 (평면도)"):
+    if os.path.exists("image_5012c2.jpg"):
+        st.image("image_5012c2.jpg", use_container_width=True)
+    else:
+        st.info("평면도 이미지(image_5012c2.jpg)를 찾을 수 없습니다.")
+
+filter_col1, filter_col2 = st.columns(2)
+with filter_col1:
+    space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
+with filter_col2:
+    status_filter = st.selectbox("진행상태 필터링", ["전체", "완료", "미완료"])
+
+target_df = df if space == "전체" else df[df['공간'] == space]
+if status_filter == "완료":
+    target_df = target_df[target_df['진행현황'].astype(str).str.strip() == '완료']
+elif status_filter == "미완료":
+    target_df = target_df[target_df['진행현황'].astype(str).str.strip() != '완료']
+
+cols = st.columns(2)
+for i, (index, row) in enumerate(target_df.iterrows()):
+    with cols[i % 2]:
+        status = str(row.get('진행현황', '미지정')).replace('nan', '미지정')
+        status_color = "#27ae60" if status == '완료' else "#e74c3c"
+
+        st.markdown(f"""
+            <div class='card' style='border-left-color: {status_color};'>
+                <h3>[{row['번호']}] {row['공간']} - {row['부위']}</h3>
+                <p><b>상태:</b> {status}</p>
+                <p><b>상세:</b> {row.get('유형', '')} / {row.get('상세내용', '')}</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+        file_name = str(row.get('저장된사진파일명', '')).strip()
+        if os.path.exists(file_name):
+            st.image(file_name, use_container_width=True)
