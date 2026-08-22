@@ -84,8 +84,20 @@ with st.expander("🗺️ 공간 위치 확인 (평면도)"):
     else:
         st.info("평면도 이미지(image_5012c2.jpg)를 찾을 수 없습니다.")
 
-space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
+filter_col1, filter_col2 = st.columns(2)
+
+with filter_col1:
+    space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
+
+with filter_col2:
+    status_filter = st.selectbox("진행상태 필터링", ["전체", "완료", "미완료"])
+
 target_df = df if space == "전체" else df[df['공간'] == space]
+
+if status_filter == "완료":
+    target_df = target_df[target_df['진행현황'].astype(str).str.strip() == '완료']
+elif status_filter == "미완료":
+    target_df = target_df[target_df['진행현황'].astype(str).str.strip() != '완료']
 
 # 리스트 출력
 cols = st.columns(2)
