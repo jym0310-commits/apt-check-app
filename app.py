@@ -5,14 +5,10 @@ import os
 st.set_page_config(layout="wide")
 st.title("🏢 해링턴 플레이스 사전점검 리스트")
 
-# 구글 드라이브 폴더의 고유 ID (형님의 공유 폴더 주소에서 가져와야 함)
-# 예: https://drive.google.com/drive/folders/1ABC-123DEF... -> 1ABC-123DEF... 부분을 아래에 복사
-GOOGLE_DRIVE_FOLDER_ID = "여기에_폴더_ID를_붙여넣으세요"
-
 EXCEL_PATH = "해링턴_사전점검_사진포함_최종.xlsx"
 
 @st.cache_data
-def load_data(mtime):  # mtime이 바뀌면 캐시 무효화 → 자동으로 새 파일 읽음
+def load_data(mtime):
     return pd.read_excel(EXCEL_PATH, sheet_name='Sheet1')
 
 mtime = os.path.getmtime(EXCEL_PATH)
@@ -31,9 +27,11 @@ for _, row in target_df.iterrows():
         st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
         st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
         
-        # 구글 드라이브 링크 조합 (직접 이미지 경로 활용)
-        # ※ 구글 드라이브 이미지를 웹에 띄우는 표준 방식 사용
-        img_id = row['저장된사진파일명']
-        st.image(f"https://lh3.googleusercontent.com/d/{img_id}", caption=img_id, use_container_width=True)
+        img_filename = str(row['저장된사진파일명']).strip()
+        
+        if img_filename and os.path.exists(img_filename):
+            st.image(img_filename, caption=img_filename, use_container_width=True)
+        else:
+            st.warning(f"이미지 파일을 찾을 수 없습니다: {img_filename}")
         
         st.divider()
