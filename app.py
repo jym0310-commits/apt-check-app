@@ -2,95 +2,38 @@ import streamlit as st
 import pandas as pd
 import os
 
-# 페이지 설정
-st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
+st.set_page_config(layout="wide")
+st.title("🏢 해링턴 플레이스 사전점검 리스트")
 
-# CSS: 다크 모드 대응 및 전문가적인 디자인
-st.markdown("""
-    <style>
-    /* 전체 배경 및 카드 스타일 */
-    .summary-card { 
-        background: #1B2845; 
-        color: #ffffff; 
-        padding: 20px; 
-        border-radius: 15px; 
-        text-align: center; 
-        margin-bottom: 20px; 
-    }
-    .card { 
-        background: #ffffff; 
-        padding: 25px; 
-        border-radius: 15px; 
-        border-left: 10px solid #1B2845; 
-        box-shadow: 0 4px 10px rgba(0,0,0,0.08); 
-        margin-bottom: 20px; 
-        color: #333333; /* 다크 모드에서도 글씨가 잘 보이게 고정 */
-    }
-    .card h3 { color: #1B2845; }
-    .stSelectbox { border: 1px solid #1B2845; }
-    </style>
-    """, unsafe_allow_html=True)
+# 구글 드라이브 폴더의 고유 ID (형님의 공유 폴더 주소에서 가져와야 함)
+# 예: https://drive.google.com/drive/folders/1ABC-123DEF... -> 1ABC-123DEF... 부분을 아래에 복사
+GOOGLE_DRIVE_FOLDER_ID = "여기에_폴더_ID를_붙여넣으세요"
 
-st.title("🏢 해링턴 플레이스 하자 관리 대시보드")
+EXCEL_PATH = "해링턴_사전점검_사진포함_최종.xlsx"
 
-# 데이터 로드
-@st.cache_data(ttl=600)
-def load_data():
-    return pd.read_excel("해링턴_사전점검_사진포함_최종.xlsx", sheet_name='Sheet1')
+@st.cache_data
+def load_data(mtime):  # mtime이 바뀌면 캐시 무효화 → 자동으로 새 파일 읽음
+    return pd.read_excel(EXCEL_PATH, sheet_name='Sheet1')
 
-df = load_data()
+mtime = os.path.getmtime(EXCEL_PATH)
+df = load_data(mtime)
+
 df.columns = [str(c).strip() for c in df.columns]
 
-# --- [전문가적인 대시보드 섹션] ---
-total = len(df)
-status_counts = df['진행현황'].value_counts() if '진행현황' in df.columns else pd.Series()
-done = status_counts.get('완료', 0)
-todo = total - done
-progress = int((done / total) * 100) if total > 0 else 0
+# 번호가 있는 행만 추출
+df = df[pd.to_numeric(df['번호'], errors='coerce').notnull()]
 
-# 요약 섹션
-st.markdown(f"""
-    <div class='summary-card'>
-        <h3>전체 하자 처리 현황</h3>
-        <div style='font-size: 40px; font-weight: bold;'>{done} / {total} 건</div>
-        <p>전체 진행률 {progress}%</p>
-    </div>
-""", unsafe_allow_html=True)
-
-# 프로그레스 바
-st.progress(progress / 100)
-
-# 통계 상세 지표
-d1, d2, d3 = st.columns(3)
-d1.metric("총 하자 건수", f"{total}건")
-d2.metric("완료 건수", f"{done}건", delta=f"{progress}%")
-d3.metric("미조치 건수", f"{todo}건", delta_color="inverse")
-
-st.markdown("---")
-
-# 공간 위치 확인 및 필터
-with st.expander("🗺️ 공간 위치 확인 (평면도)"):
-    st.image("image_5012c2.jpg", use_container_width=True)
-
-space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
+space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
 target_df = df if space == "전체" else df[df['공간'] == space]
 
-# 리스트 출력
-cols = st.columns(2)
-for i, (index, row) in enumerate(target_df.iterrows()):
-    with cols[i % 2]:
-        # 'nan' 문제를 '미지정'으로 깔끔하게 처리
-        status = str(row.get('진행현황', '미지정')).replace('nan', '미지정')
-        status_color = "#27ae60" if status == '완료' else "#e74c3c"
+for _, row in target_df.iterrows():
+    with st.container():
+        st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
+        st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
         
-        st.markdown(f"""
-            <div class='card' style='border-left-color: {status_color};'>
-                <h3>[{row['번호']}] {row['공간']} - {row['부위']}</h3>
-                <p><b>상태:</b> {status}</p>
-                <p><b>상세:</b> {row.get('유형', '')} / {row.get('상세내용', '')}</p>
-            </div>
-        """, unsafe_allow_html=True)
+        # 구글 드라이브 링크 조합 (직접 이미지 경로 활용)
+        # ※ 구글 드라이브 이미지를 웹에 띄우는 표준 방식 사용
+        img_id = row['저장된사진파일명']
+        st.image(f"https://lh3.googleusercontent.com/d/{img_id}", caption=img_id, use_container_width=True)
         
-        file_name = str(row.get('저장된사진파일명', '')).strip()
-        if os.path.exists(file_name):
-            st.image(file_name, use_container_width=True)
+        st.divider()
