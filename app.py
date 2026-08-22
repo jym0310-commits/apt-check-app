@@ -3,43 +3,106 @@ import pandas as pd
 import os
 import glob
 
-st.set_page_config(layout="wide")
-st.title("🏢 해링턴 플레이스 사전점검 리스트")
+# 페이지 설정
+st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
 
-# 저장소 안에서 xlsx 파일을 자동으로 찾음 (파일명 오타/인코딩 문제 회피)
+# CSS: 다크 모드 대응 및 전문가적인 디자인
+st.markdown("""
+    <style>
+    /* 전체 배경 및 카드 스타일 */
+    .summary-card { 
+        background: #1B2845; 
+        color: #ffffff; 
+        padding: 20px; 
+        border-radius: 15px; 
+        text-align: center; 
+        margin-bottom: 20px; 
+    }
+    .card { 
+        background: #ffffff; 
+        padding: 25px; 
+        border-radius: 15px; 
+        border-left: 10px solid #1B2845; 
+        box-shadow: 0 4px 10px rgba(0,0,0,0.08); 
+        margin-bottom: 20px; 
+        color: #333333; /* 다크 모드에서도 글씨가 잘 보이게 고정 */
+    }
+    .card h3 { color: #1B2845; }
+    .stSelectbox { border: 1px solid #1B2845; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🏢 해링턴 플레이스 하자 관리 대시보드")
+
+# 엑셀 파일 자동 탐색 (파일명 오타/인코딩 문제 회피)
 excel_candidates = glob.glob("*.xlsx")
-
 if not excel_candidates:
     st.error("저장소 안에서 엑셀(.xlsx) 파일을 찾지 못했습니다. GitHub에 파일이 실제로 존재하는지 확인해 주세요.")
     st.stop()
-
 EXCEL_PATH = excel_candidates[0]
-st.caption(f"불러온 파일: {EXCEL_PATH}")  # 확인용, 나중에 지워도 됨
 
+# 데이터 로드 (mtime을 캐시 키로 사용 → 파일이 바뀌면 자동으로 새로 읽음)
 @st.cache_data
 def load_data(mtime, path):
     return pd.read_excel(path, sheet_name='Sheet1')
 
 mtime = os.path.getmtime(EXCEL_PATH)
 df = load_data(mtime, EXCEL_PATH)
-
 df.columns = [str(c).strip() for c in df.columns]
 
-df = df[pd.to_numeric(df['번호'], errors='coerce').notnull()]
+# --- [전문가적인 대시보드 섹션] ---
+total = len(df)
+status_counts = df['진행현황'].value_counts() if '진행현황' in df.columns else pd.Series()
+done = status_counts.get('완료', 0)
+todo = total - done
+progress = int((done / total) * 100) if total > 0 else 0
 
-space = st.selectbox("공간 선택", ["전체"] + list(df['공간'].unique()))
+# 요약 섹션
+st.markdown(f"""
+    <div class='summary-card'>
+        <h3>전체 하자 처리 현황</h3>
+        <div style='font-size: 40px; font-weight: bold;'>{done} / {total} 건</div>
+        <p>전체 진행률 {progress}%</p>
+    </div>
+""", unsafe_allow_html=True)
+
+# 프로그레스 바
+st.progress(progress / 100)
+
+# 통계 상세 지표
+d1, d2, d3 = st.columns(3)
+d1.metric("총 하자 건수", f"{total}건")
+d2.metric("완료 건수", f"{done}건", delta=f"{progress}%")
+d3.metric("미조치 건수", f"{todo}건", delta_color="inverse")
+
+st.markdown("---")
+
+# 공간 위치 확인 및 필터
+with st.expander("🗺️ 공간 위치 확인 (평면도)"):
+    if os.path.exists("image_5012c2.jpg"):
+        st.image("image_5012c2.jpg", use_container_width=True)
+    else:
+        st.info("평면도 이미지(image_5012c2.jpg)를 찾을 수 없습니다.")
+
+space = st.selectbox("공간별 필터링", ["전체"] + list(df['공간'].unique()))
 target_df = df if space == "전체" else df[df['공간'] == space]
 
-for _, row in target_df.iterrows():
-    with st.container():
-        st.markdown(f"### 🔴 [{row['번호']}] {row['공간']} - {row['부위']}")
-        st.markdown(f"**상세내용:** {row['유형']} / {row['상세내용']}")
+# 리스트 출력
+cols = st.columns(2)
+for i, (index, row) in enumerate(target_df.iterrows()):
+    with cols[i % 2]:
+        # 'nan' 문제를 '미지정'으로 깔끔하게 처리
+        status = str(row.get('진행현황', '미지정')).replace('nan', '미지정')
+        status_color = "#27ae60" if status == '완료' else "#e74c3c"
         
-        img_filename = str(row['저장된사진파일명']).strip()
+        st.markdown(f"""
+            <div class='card' style='border-left-color: {status_color};'>
+                <h3>[{row['번호']}] {row['공간']} - {row['부위']}</h3>
+                <p><b>상태:</b> {status}</p>
+                <p><b>상세:</b> {row.get('유형', '')} / {row.get('상세내용', '')}</p>
+            </div>
+        """, unsafe_allow_html=True)
         
-        if img_filename and os.path.exists(img_filename):
-            st.image(img_filename, caption=img_filename, use_container_width=True)
-        else:
-            st.warning(f"이미지 파일을 찾을 수 없습니다: {img_filename}")
-        
-        st.divider()
+        file_name = str(row.get('저장된사진파일명', '')).strip()
+        if os.path.exists(file_name):
+            st.image(file_name, use_container_width=True)
