@@ -422,9 +422,9 @@ if not st.session_state.logged_in_unit:
         with st.form("unit_login_form"):
             lc1, lc2 = st.columns(2)
             with lc1:
-                login_building_raw = st.text_input("동", placeholder="예: 204 또는 204동")
+                login_building_raw = st.text_input("동", placeholder="예: 101 또는 101동")
             with lc2:
-                login_unit_raw = st.text_input("호수", placeholder="예: 4503 또는 4503호")
+                login_unit_raw = st.text_input("호수", placeholder="예: 1111 또는 1111호")
             login_submit = st.form_submit_button("세대 관리 시작", use_container_width=True, type="primary")
 
         if login_submit:
