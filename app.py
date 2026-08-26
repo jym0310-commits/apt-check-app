@@ -227,9 +227,9 @@ st.markdown(
       <div class="unit-pill">{html.escape(CURRENT_BUILDING)} · {html.escape(CURRENT_UNIT)}</div>
     </div>
     <div class="hero">
-      <div class="eyebrow">세대 하자 관리 대시보드</div>
-      <div class="hero-title">처리할 하자는 선명하게,<br>완료한 항목은 간단하게.</div>
-      <div class="hero-copy">현재 세대의 하자 등록, 진행상태 확인, 사진 관리와 A/S 신청서 출력을 한 화면에서 처리할 수 있습니다.</div>
+      <div class="eyebrow">세대 하자 관리</div>
+      <div class="hero-title">{html.escape(CURRENT_BUILDING)} {html.escape(CURRENT_UNIT)}</div>
+      <div class="hero-copy">하자 등록 · 진행현황 · A/S 신청</div>
     </div>
     """,
     unsafe_allow_html=True,
