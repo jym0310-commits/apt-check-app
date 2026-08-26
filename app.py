@@ -127,8 +127,27 @@ st.markdown(
     .status-meta { font-size:11px; color:var(--mute); margin-top:10px; }
 
     div[data-testid="stForm"] { border:1px solid var(--line) !important; border-radius:12px !important; padding:22px !important; background:white; }
-    div[data-testid="stExpander"] { border:1px solid var(--line) !important; border-radius:12px !important; background:white !important; box-shadow:none !important; }
-    div[data-testid="stExpander"] details summary { font-weight:600; }
+    div[data-testid="stExpander"] {
+        border:1.5px solid #b8b8b8 !important;
+        border-radius:12px !important;
+        background:#f7f7f7 !important;
+        box-shadow:none !important;
+        overflow:hidden !important;
+    }
+    div[data-testid="stExpander"] details summary {
+        min-height:46px !important;
+        padding:0 14px !important;
+        font-weight:700 !important;
+        color:#111111 !important;
+        background:#f3f3f3 !important;
+    }
+    div[data-testid="stExpander"] details summary:hover {
+        background:#ededed !important;
+    }
+    div[data-testid="stExpander"] details[open] summary {
+        background:#eeeeee !important;
+        border-bottom:1px solid #d6d6d6 !important;
+    }
     div[data-baseweb="select"] > div, .stTextInput input, .stTextArea textarea {
         border-color:var(--line-strong) !important; border-radius:12px !important; box-shadow:none !important;
     }
