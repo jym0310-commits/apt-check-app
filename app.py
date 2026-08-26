@@ -320,6 +320,46 @@ def save_unit_pin(building, unit, pin):
         ws.append_row(row_data[0])
     load_unit_accounts.clear()
 
+def reset_unit_pin(building, unit):
+    """관리자용: 해당 세대 PIN 해시를 제거해 최초 로그인 상태로 되돌립니다."""
+    ws = get_unit_accounts_worksheet()
+    values = ws.get_all_values()
+    if not values:
+        return False
+
+    headers = [str(x).strip() for x in values[0]]
+    try:
+        b_idx = headers.index("동")
+        u_idx = headers.index("호")
+    except ValueError:
+        b_idx, u_idx = 0, 1
+
+    salt_idx = headers.index("pin_salt") if "pin_salt" in headers else 2
+    hash_idx = headers.index("pin_hash") if "pin_hash" in headers else 3
+    updated_idx = headers.index("updated_at") if "updated_at" in headers else 4
+
+    for row_no, row in enumerate(values[1:], start=2):
+        b = normalize_building(row[b_idx] if b_idx < len(row) else "")
+        u = normalize_unit(row[u_idx] if u_idx < len(row) else "")
+        if b == building and u == unit:
+            now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+            max_col = max(salt_idx, hash_idx, updated_idx) + 1
+            padded = list(row) + [""] * max(0, max_col - len(row))
+            padded[salt_idx] = ""
+            padded[hash_idx] = ""
+            padded[updated_idx] = now
+            ws.update([padded[:max_col]], f"A{row_no}:{gspread.utils.rowcol_to_a1(row_no, max_col)}")
+            load_unit_accounts.clear()
+            return True
+    return False
+
+
+def admin_password_ok(password):
+    configured = str(auth_get_secret("ADMIN_PASSWORD", "") or "")
+    if not configured:
+        return False
+    return pysecrets.compare_digest(str(password), configured)
+
 
 @st.cache_resource
 def get_active_unit_registry():
@@ -456,6 +496,36 @@ if not st.session_state.logged_in_unit:
                         st.session_state.login_building = login_building
                         st.session_state.login_unit = login_unit
                         st.rerun()
+
+    st.markdown("---")
+    with st.expander("⚙️ 관리자 PIN 초기화", expanded=False):
+        st.caption("PIN을 잊어버린 세대의 PIN만 초기화합니다. 하자 데이터는 삭제되지 않습니다.")
+        with st.form("admin_pin_reset_login_form"):
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                admin_building_raw = st.text_input("초기화할 동", placeholder="예: 101 또는 101동", key="admin_login_building")
+            with ac2:
+                admin_unit_raw = st.text_input("초기화할 호수", placeholder="예: 1111 또는 1111호", key="admin_login_unit")
+            admin_password = st.text_input("관리자 비밀번호", type="password", key="admin_login_password")
+            admin_reset_submit = st.form_submit_button("PIN 초기화", use_container_width=True)
+
+        if admin_reset_submit:
+            target_b = normalize_building(admin_building_raw)
+            target_u = normalize_unit(admin_unit_raw)
+            if not auth_get_secret("ADMIN_PASSWORD"):
+                st.error("Streamlit Secrets에 ADMIN_PASSWORD가 설정되지 않았습니다.")
+            elif not admin_password_ok(admin_password):
+                st.error("관리자 비밀번호가 올바르지 않습니다.")
+            elif not target_b or not target_u:
+                st.error("동과 호수를 모두 입력해 주세요.")
+            else:
+                try:
+                    if reset_unit_pin(target_b, target_u):
+                        st.success(f"{target_b} {target_u}의 PIN을 초기화했습니다. 다음 로그인은 동·호수만으로 가능합니다.")
+                    else:
+                        st.info("해당 세대에 설정된 PIN 계정을 찾지 못했습니다.")
+                except Exception as exc:
+                    st.error(f"PIN 초기화에 실패했습니다: {exc}")
     st.stop()
 
 CURRENT_BUILDING = st.session_state.get("login_building", LEGACY_BUILDING)
@@ -512,6 +582,34 @@ with st.sidebar:
                         st.rerun()
                     except Exception as exc:
                         st.error(f"PIN 변경에 실패했습니다: {exc}")
+
+    with st.expander("⚙️ 관리자"):
+        st.caption("세대 PIN을 잊어버린 경우 관리자 권한으로 초기화할 수 있습니다.")
+        with st.form("admin_pin_reset_sidebar_form"):
+            sb1, sb2 = st.columns(2)
+            with sb1:
+                sb_building_raw = st.text_input("동", placeholder="101", key="admin_sb_building")
+            with sb2:
+                sb_unit_raw = st.text_input("호수", placeholder="1111", key="admin_sb_unit")
+            sb_admin_password = st.text_input("관리자 비밀번호", type="password", key="admin_sb_password")
+            sb_reset_submit = st.form_submit_button("해당 세대 PIN 초기화", use_container_width=True)
+        if sb_reset_submit:
+            target_b = normalize_building(sb_building_raw)
+            target_u = normalize_unit(sb_unit_raw)
+            if not auth_get_secret("ADMIN_PASSWORD"):
+                st.error("ADMIN_PASSWORD가 설정되지 않았습니다.")
+            elif not admin_password_ok(sb_admin_password):
+                st.error("관리자 비밀번호가 올바르지 않습니다.")
+            elif not target_b or not target_u:
+                st.error("동과 호수를 모두 입력해 주세요.")
+            else:
+                try:
+                    if reset_unit_pin(target_b, target_u):
+                        st.success(f"{target_b} {target_u} PIN을 초기화했습니다.")
+                    else:
+                        st.info("해당 세대에 설정된 PIN 계정을 찾지 못했습니다.")
+                except Exception as exc:
+                    st.error(f"PIN 초기화에 실패했습니다: {exc}")
 
     if st.button("로그아웃", use_container_width=True):
         release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
