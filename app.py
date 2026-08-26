@@ -4,6 +4,8 @@ import html
 import io
 import json
 import os
+import threading
+import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -35,6 +37,8 @@ MAX_UPLOAD_IMAGES = 5
 IMAGE_CHUNK_SIZE = 40000
 LEGACY_BUILDING = "204동"
 LEGACY_UNIT = "4503호"
+MAX_ACTIVE_UNITS = 100
+SESSION_IDLE_TIMEOUT_SECONDS = 10 * 60
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -59,7 +63,7 @@ st.markdown(
         color: var(--ink);
     }
     .stApp { background: var(--canvas); }
-    .block-container { max-width: 1180px; padding-top: 2.1rem; padding-bottom: 5rem; }
+    .block-container { max-width: 1180px; padding-top: 3.8rem; padding-bottom: 5rem; }
     header[data-testid="stHeader"] { background: rgba(255,255,255,.96); border-bottom: 1px solid var(--line); }
     [data-testid="stSidebar"] { background: var(--soft); border-right: 1px solid var(--line); }
 
@@ -71,7 +75,8 @@ st.markdown(
 
     .app-nav {
         display:flex; align-items:center; justify-content:space-between; gap:16px;
-        padding: 4px 0 28px 0; margin-bottom: 22px; border-bottom:1px solid var(--line);
+        min-height: 48px; padding: 8px 0 24px 0; margin-bottom: 22px; border-bottom:1px solid var(--line);
+        overflow: visible;
     }
     .brand-wrap { display:flex; align-items:center; gap:12px; }
     .brand-mark {
@@ -141,7 +146,7 @@ st.markdown(
     hr { border:none !important; border-top:1px solid var(--line) !important; margin:40px 0 !important; }
 
     @media (max-width: 760px) {
-        .block-container { padding: 1rem 1rem 4rem 1rem; }
+        .block-container { padding: 3.6rem 1rem 4rem 1rem; }
         .app-nav { padding-bottom:18px; margin-bottom:10px; }
         .hero { padding:20px 0 24px 0; }
         .hero-title, .login-title { font-size:28px; }
@@ -155,7 +160,7 @@ st.markdown(
 
 
 # -------------------------
-# 세대 로그인 (동/호수)
+# 세대 로그인 (동/호수) + 동시 활성 세대 제한
 # -------------------------
 def normalize_building(value):
     value = str(value or "").strip()
@@ -171,6 +176,55 @@ def normalize_unit(value):
     return value if value.endswith("호") else f"{value}호"
 
 
+@st.cache_resource
+def get_active_unit_registry():
+    # Streamlit 프로세스 내에서 공유되는 경량 활성 세대 레지스트리입니다.
+    return {"units": {}, "lock": threading.Lock()}
+
+
+def _prune_inactive_units(registry, now_ts):
+    stale_keys = [
+        key
+        for key, last_seen in registry["units"].items()
+        if now_ts - last_seen > SESSION_IDLE_TIMEOUT_SECONDS
+    ]
+    for key in stale_keys:
+        registry["units"].pop(key, None)
+
+
+def claim_active_unit(building, unit):
+    registry = get_active_unit_registry()
+    unit_key = f"{building}|{unit}"
+    now_ts = time.time()
+    with registry["lock"]:
+        _prune_inactive_units(registry, now_ts)
+        # 같은 세대가 이미 접속 중이면 새 슬롯을 차지하지 않고 활동시간만 갱신합니다.
+        if unit_key in registry["units"]:
+            registry["units"][unit_key] = now_ts
+            return True, len(registry["units"])
+        if len(registry["units"]) >= MAX_ACTIVE_UNITS:
+            return False, len(registry["units"])
+        registry["units"][unit_key] = now_ts
+        return True, len(registry["units"])
+
+
+def touch_active_unit(building, unit):
+    registry = get_active_unit_registry()
+    unit_key = f"{building}|{unit}"
+    now_ts = time.time()
+    with registry["lock"]:
+        _prune_inactive_units(registry, now_ts)
+        registry["units"][unit_key] = now_ts
+        return len(registry["units"])
+
+
+def release_active_unit(building, unit):
+    registry = get_active_unit_registry()
+    unit_key = f"{building}|{unit}"
+    with registry["lock"]:
+        registry["units"].pop(unit_key, None)
+
+
 if "logged_in_unit" not in st.session_state:
     st.session_state.logged_in_unit = False
 
@@ -179,8 +233,8 @@ if not st.session_state.logged_in_unit:
         """
         <div class="login-shell">
           <div class="login-logo">✓</div>
-          <div class="login-title">우리 집 하자를<br>한 곳에서 관리하세요.</div>
-          <div class="login-copy">동과 호수만 입력하면 해당 세대의 하자 목록, 진행상태, 사진과 A/S 신청서를 한 화면에서 관리할 수 있습니다.</div>
+          <div class="login-title">세대 하자 관리</div>
+          <div class="login-copy">동과 호수를 입력해 주세요.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -199,33 +253,37 @@ if not st.session_state.logged_in_unit:
         if not login_building or not login_unit:
             st.error("동과 호수를 모두 입력해 주세요.")
         else:
-            st.session_state.logged_in_unit = True
-            st.session_state.login_building = login_building
-            st.session_state.login_unit = login_unit
-            st.rerun()
+            admitted, active_count = claim_active_unit(login_building, login_unit)
+            if not admitted:
+                st.warning(
+                    f"현재 접속자가 많습니다. 잠시 후 다시 접속해 주세요. "
+                    f"(최대 동시 접속 {MAX_ACTIVE_UNITS}세대)"
+                )
+                st.caption("10분 동안 활동이 없는 세대는 자동으로 접속 자리에서 제외됩니다.")
+            else:
+                st.session_state.logged_in_unit = True
+                st.session_state.login_building = login_building
+                st.session_state.login_unit = login_unit
+                st.rerun()
     st.stop()
 
 CURRENT_BUILDING = st.session_state.get("login_building", LEGACY_BUILDING)
 CURRENT_UNIT = st.session_state.get("login_unit", LEGACY_UNIT)
+ACTIVE_UNIT_COUNT = touch_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
 
 with st.sidebar:
     st.markdown("### 현재 세대")
     st.markdown(f"**{CURRENT_BUILDING} {CURRENT_UNIT}**")
     st.caption("이 세대의 데이터만 표시됩니다.")
     if st.button("로그아웃", use_container_width=True):
+        release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
         for key in ["logged_in_unit", "login_building", "login_unit"]:
             st.session_state.pop(key, None)
         st.rerun()
 
+# 상단 보조 브랜드 바는 제거하고, 핵심 정보부터 바로 표시합니다.
 st.markdown(
     f"""
-    <div class="app-nav">
-      <div class="brand-wrap">
-        <div class="brand-mark">✓</div>
-        <div><div class="brand-title">해링턴 하자관리</div><div class="brand-sub">Home inspection workspace</div></div>
-      </div>
-      <div class="unit-pill">{html.escape(CURRENT_BUILDING)} · {html.escape(CURRENT_UNIT)}</div>
-    </div>
     <div class="hero">
       <div class="eyebrow">세대 하자 관리</div>
       <div class="hero-title">{html.escape(CURRENT_BUILDING)} {html.escape(CURRENT_UNIT)}</div>
