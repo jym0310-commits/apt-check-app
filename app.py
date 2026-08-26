@@ -1,7 +1,9 @@
+import base64
 import glob
 import io
 import json
 import os
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,6 +13,7 @@ import streamlit as st
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
+from PIL import Image, ImageOps
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
@@ -21,6 +24,10 @@ st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템"
 
 WEB_STATUS_OPTIONS = ["미확인", "확인완료", "재확인필요"]
 WEB_STATUS_SHEET_NAME = "web_status"
+WEB_ITEMS_SHEET_NAME = "web_items"
+WEB_IMAGES_SHEET_NAME = "web_images"
+MAX_UPLOAD_IMAGES = 5
+IMAGE_CHUNK_SIZE = 40000
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -109,21 +116,14 @@ def get_secret(name, default=None):
 
 
 @st.cache_resource
-def get_web_status_worksheet():
-    """웹 전용 상태를 저장할 Google Sheet의 worksheet를 반환한다.
-
-    우선 Streamlit Secrets의 gcp_service_account를 사용하고,
-    로컬 개발에서는 기존 credentials.json도 fallback으로 지원한다.
-    """
+def get_google_spreadsheet():
+    """Streamlit Secrets/credentials.json으로 Google Spreadsheet 연결."""
     sheet_id = get_secret("WEB_STATUS_SHEET_ID") or os.getenv("WEB_STATUS_SHEET_ID")
     if not sheet_id:
         raise RuntimeError("WEB_STATUS_SHEET_ID가 설정되지 않았습니다.")
 
     service_account_info = get_secret("gcp_service_account")
     if service_account_info:
-        # 기존 Streamlit Secrets 형식 지원:
-        # [gcp_service_account]
-        # json_key = '{"type":"service_account", ...}'
         service_account_info = dict(service_account_info)
         if "json_key" in service_account_info:
             raw_json = service_account_info["json_key"]
@@ -131,36 +131,35 @@ def get_web_status_worksheet():
                 service_account_info = json.loads(raw_json)
             elif isinstance(raw_json, dict):
                 service_account_info = dict(raw_json)
-
-        credentials = Credentials.from_service_account_info(
-            service_account_info, scopes=GOOGLE_SCOPES
-        )
+        credentials = Credentials.from_service_account_info(service_account_info, scopes=GOOGLE_SCOPES)
     elif os.path.exists("credentials.json"):
-        credentials = Credentials.from_service_account_file(
-            "credentials.json", scopes=GOOGLE_SCOPES
-        )
+        credentials = Credentials.from_service_account_file("credentials.json", scopes=GOOGLE_SCOPES)
     else:
-        raise RuntimeError(
-            "Google 서비스 계정 인증정보가 없습니다. Streamlit Secrets의 "
-            "gcp_service_account 또는 로컬 credentials.json을 설정해 주세요."
-        )
+        raise RuntimeError("Google 서비스 계정 인증정보가 없습니다.")
 
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open_by_key(sheet_id)
+    return gspread.authorize(credentials).open_by_key(sheet_id)
 
+
+def get_or_create_worksheet(name, headers, rows=500, cols=10):
+    spreadsheet = get_google_spreadsheet()
     try:
-        worksheet = spreadsheet.worksheet(WEB_STATUS_SHEET_NAME)
+        ws = spreadsheet.worksheet(name)
     except WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=WEB_STATUS_SHEET_NAME, rows=300, cols=4
-        )
-        worksheet.append_row(["item_id", "web_status", "updated_at", "item_label"])
+        ws = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
+        ws.append_row(headers)
+    if not ws.get_all_values():
+        ws.append_row(headers)
+    return ws
 
-    # 빈 시트인 경우 헤더 생성
-    if not worksheet.get_all_values():
-        worksheet.append_row(["item_id", "web_status", "updated_at", "item_label"])
 
-    return worksheet
+@st.cache_resource
+def get_web_status_worksheet():
+    return get_or_create_worksheet(
+        WEB_STATUS_SHEET_NAME,
+        ["item_id", "web_status", "updated_at", "item_label"],
+        rows=500,
+        cols=4,
+    )
 
 
 @st.cache_data(ttl=30)
@@ -201,6 +200,128 @@ def save_web_status(item_id, new_status, item_label):
     load_web_status.clear()
 
 
+@st.cache_data(ttl=30)
+def load_web_items():
+    ws = get_or_create_worksheet(
+        WEB_ITEMS_SHEET_NAME,
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        rows=500,
+        cols=7,
+    )
+    records = ws.get_all_records()
+    rows = []
+    for r in records:
+        if str(r.get("active", "TRUE")).strip().upper() in {"FALSE", "0", "N", "NO"}:
+            continue
+        item_id = str(r.get("item_id", "")).strip()
+        if not item_id:
+            continue
+        rows.append({
+            "번호": item_id,
+            "공간": str(r.get("공간", "")).strip(),
+            "부위": str(r.get("부위", "")).strip(),
+            "유형": str(r.get("유형", "")).strip(),
+            "상세내용": str(r.get("상세내용", "")).strip(),
+            "진행현황_표시": "웹등록",
+            "저장된사진파일명": "",
+            "데이터출처": "웹등록",
+            "등록일시": str(r.get("created_at", "")).strip(),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=30)
+def load_web_images():
+    ws = get_or_create_worksheet(
+        WEB_IMAGES_SHEET_NAME,
+        ["image_id", "item_id", "sort_order", "chunk_index", "mime_type", "data_chunk"],
+        rows=5000,
+        cols=6,
+    )
+    values = ws.get_all_values()
+    grouped = {}
+    for row in values[1:]:
+        if len(row) < 6:
+            row = row + [""] * (6 - len(row))
+        image_id, item_id, sort_order, chunk_index, mime_type, data_chunk = row[:6]
+        if not image_id or not item_id:
+            continue
+        key = (item_id, image_id)
+        g = grouped.setdefault(key, {"sort_order": int(sort_order or 0), "mime_type": mime_type or "image/jpeg", "chunks": []})
+        try:
+            idx = int(chunk_index or 0)
+        except Exception:
+            idx = 0
+        g["chunks"].append((idx, data_chunk))
+
+    result = {}
+    for (item_id, image_id), info in grouped.items():
+        encoded = "".join(chunk for _, chunk in sorted(info["chunks"], key=lambda x: x[0]))
+        try:
+            data = base64.b64decode(encoded)
+        except Exception:
+            continue
+        result.setdefault(item_id, []).append({
+            "image_id": image_id,
+            "sort_order": info["sort_order"],
+            "mime_type": info["mime_type"],
+            "data": data,
+        })
+    for item_id in result:
+        result[item_id].sort(key=lambda x: x["sort_order"])
+    return result
+
+
+def compress_image(uploaded_file):
+    uploaded_file.seek(0)
+    image = Image.open(uploaded_file)
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.thumbnail((1400, 1400))
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=76, optimize=True)
+    return out.getvalue(), "image/jpeg"
+
+
+def save_web_images(item_id, uploaded_files):
+    if not uploaded_files:
+        return
+    ws = get_or_create_worksheet(
+        WEB_IMAGES_SHEET_NAME,
+        ["image_id", "item_id", "sort_order", "chunk_index", "mime_type", "data_chunk"],
+        rows=5000,
+        cols=6,
+    )
+    append_rows = []
+    for sort_order, uploaded in enumerate(uploaded_files[:MAX_UPLOAD_IMAGES], start=1):
+        data, mime = compress_image(uploaded)
+        encoded = base64.b64encode(data).decode("ascii")
+        image_id = f"IMG-{uuid.uuid4().hex[:12]}"
+        chunks = [encoded[i:i+IMAGE_CHUNK_SIZE] for i in range(0, len(encoded), IMAGE_CHUNK_SIZE)]
+        for chunk_index, chunk in enumerate(chunks):
+            append_rows.append([image_id, item_id, sort_order, chunk_index, mime, chunk])
+    if append_rows:
+        ws.append_rows(append_rows, value_input_option="RAW")
+    load_web_images.clear()
+
+
+def create_web_item(space, part, issue_type, detail, initial_status, uploaded_files):
+    ws = get_or_create_worksheet(
+        WEB_ITEMS_SHEET_NAME,
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        rows=500,
+        cols=7,
+    )
+    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+    item_id = f"WEB-{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+    ws.append_row([item_id, space, part, issue_type, detail, now, "TRUE"])
+    item_label = f"[{item_id}] {space} - {part}"
+    save_web_status(item_id, initial_status, item_label)
+    save_web_images(item_id, uploaded_files)
+    load_web_items.clear()
+    load_web_status.clear()
+    return item_id
+
+
 web_status_enabled = True
 web_status_error = None
 try:
@@ -216,7 +337,28 @@ if not web_status_enabled:
         f"설정 내용: {web_status_error}"
     )
 
-# 각 행에 웹 상태를 붙인다. 번호는 현재 Excel에서 고유값으로 사용한다.
+# 웹에서 새로 등록한 항목도 함께 불러온다.
+try:
+    web_items_df = load_web_items() if web_status_enabled else pd.DataFrame()
+    web_images_map = load_web_images() if web_status_enabled else {}
+except Exception as exc:
+    web_items_df = pd.DataFrame()
+    web_images_map = {}
+    st.warning(f"웹 신규등록 데이터 조회 실패: {type(exc).__name__}: {exc}")
+
+# Excel 데이터에 출처 표시 후 웹 등록 데이터를 병합한다.
+df["데이터출처"] = "Excel"
+df["등록일시"] = ""
+if not web_items_df.empty:
+    for col in df.columns:
+        if col not in web_items_df.columns:
+            web_items_df[col] = ""
+    for col in web_items_df.columns:
+        if col not in df.columns:
+            df[col] = ""
+    df = pd.concat([df, web_items_df[df.columns]], ignore_index=True)
+
+# 각 행에 웹 상태를 붙인다. Excel 번호 또는 WEB-... ID를 키로 사용한다.
 df["웹확인상태"] = df["번호"].apply(
     lambda x: web_status_map.get(str(x).strip(), {}).get("status", "미확인")
 )
@@ -285,6 +427,7 @@ def build_as_request_docx(source_df, selected_web_statuses):
                 table.cell(idx, 0).text = label
                 table.cell(idx, 1).text = value
 
+            # 기존 Excel 사진 + 웹 신규등록 사진 모두 출력
             file_name = str(row.get("저장된사진파일명", "") or "").strip()
             if file_name and os.path.exists(file_name):
                 try:
@@ -293,6 +436,14 @@ def build_as_request_docx(source_df, selected_web_statuses):
                     p_img.add_run().add_picture(file_name, width=Inches(4.8))
                 except Exception:
                     doc.add_paragraph(f"사진 파일: {file_name}")
+
+            for web_img in web_images_map.get(item_id, []):
+                try:
+                    p_img = doc.add_paragraph()
+                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_img.add_run().add_picture(io.BytesIO(web_img["data"]), width=Inches(4.8))
+                except Exception:
+                    pass
 
             if seq != len(selected):
                 doc.add_paragraph("―" * 35)
@@ -306,8 +457,9 @@ def build_as_request_docx(source_df, selected_web_statuses):
 # -------------------------
 # 기존 Excel 진행현황 요약
 # -------------------------
-total = len(df)
-status_counts = df["진행현황_표시"].value_counts()
+excel_only_df = df[df["데이터출처"] == "Excel"].copy()
+total = len(excel_only_df)
+status_counts = excel_only_df["진행현황_표시"].value_counts()
 done = status_counts.get("완료", 0)
 todo = total - done
 progress = int((done / total) * 100) if total > 0 else 0
@@ -340,6 +492,51 @@ w1, w2, w3 = st.columns(3)
 w1.metric("미확인", f"{web_unchecked}건")
 w2.metric("확인완료", f"{web_checked}건")
 w3.metric("재확인필요", f"{web_recheck}건")
+
+web_added_count = int((df["데이터출처"] == "웹등록").sum())
+st.caption(f"웹에서 새로 등록한 하자: {web_added_count}건")
+
+# -------------------------
+# 웹 신규 하자 등록
+# -------------------------
+with st.expander("➕ 새 하자 등록", expanded=False):
+    st.caption("새 항목은 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. 사진은 최대 5장까지 첨부할 수 있습니다.")
+    with st.form("new_issue_form", clear_on_submit=True):
+        f1, f2 = st.columns(2)
+        with f1:
+            new_space = st.text_input("공간 *", placeholder="예: 거실, 침실1, 주방")
+            new_type = st.text_input("유형", placeholder="예: 파손, 오염, 들뜸")
+        with f2:
+            new_part = st.text_input("부위 *", placeholder="예: 벽지, 문틀, 바닥")
+            new_initial_status = st.selectbox("등록 후 웹 확인상태", WEB_STATUS_OPTIONS, index=2)
+        new_detail = st.text_area("상세내용 *", placeholder="하자 위치와 증상을 자세히 입력해 주세요.", height=110)
+        new_photos = st.file_uploader(
+            "사진 첨부 (최대 5장)",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            help="사진은 Google Sheet에 압축하여 별도 저장됩니다.",
+        )
+        submitted = st.form_submit_button("💾 새 하자 등록", use_container_width=True, disabled=not web_status_enabled)
+
+    if submitted:
+        if not new_space.strip() or not new_part.strip() or not new_detail.strip():
+            st.error("공간, 부위, 상세내용은 필수입니다.")
+        elif len(new_photos or []) > MAX_UPLOAD_IMAGES:
+            st.error(f"사진은 최대 {MAX_UPLOAD_IMAGES}장까지 첨부할 수 있습니다.")
+        else:
+            try:
+                new_id = create_web_item(
+                    new_space.strip(),
+                    new_part.strip(),
+                    new_type.strip(),
+                    new_detail.strip(),
+                    new_initial_status,
+                    new_photos or [],
+                )
+                st.success(f"새 하자가 등록되었습니다. ID: {new_id}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"새 하자 등록 실패: {type(exc).__name__}: {exc}")
 
 # AS 신청서 출력: Excel 상태가 아니라 웹 확인상태를 기준으로 대상 선정
 with st.expander("📝 AS 신청서 출력", expanded=False):
@@ -383,7 +580,7 @@ with filter_col1:
     space = st.selectbox("공간별 필터링", ["전체"] + spaces)
 
 with filter_col2:
-    status_filter = st.selectbox("Excel 진행상태", ["전체", "완료", "미완료"])
+    status_filter = st.selectbox("Excel 진행상태", ["전체", "완료", "미완료", "웹등록"])
 
 with filter_col3:
     web_filter = st.selectbox(
@@ -399,7 +596,9 @@ if space != "전체":
 if status_filter == "완료":
     target_df = target_df[target_df["진행현황_표시"] == "완료"]
 elif status_filter == "미완료":
-    target_df = target_df[target_df["진행현황_표시"] != "완료"]
+    target_df = target_df[(target_df["데이터출처"] == "Excel") & (target_df["진행현황_표시"] != "완료")]
+elif status_filter == "웹등록":
+    target_df = target_df[target_df["데이터출처"] == "웹등록"]
 
 if web_filter != "전체":
     target_df = target_df[target_df["웹확인상태"] == web_filter]
@@ -435,7 +634,7 @@ for i, (index, row) in enumerate(target_df.iterrows()):
             f"""
             <div class='card' style='border-left-color: {status_color};'>
                 <h3>{item_label}</h3>
-                <p><b>Excel 상태:</b> {excel_status}</p>
+                <p><b>원본 상태:</b> {excel_status} <span style="color:#64748b;">({row.get("데이터출처", "Excel")})</span></p>
                 <p><b>상세:</b> {type_text} / {detail_text}</p>
             </div>
             <div class='web-status-box'>
@@ -492,5 +691,15 @@ for i, (index, row) in enumerate(target_df.iterrows()):
                     st.error(f"웹 상태 저장 실패: {exc}")
 
         file_name = str(row.get("저장된사진파일명", "")).strip()
-        if os.path.exists(file_name):
+        if file_name and os.path.exists(file_name):
             st.image(file_name, use_container_width=True)
+
+        web_imgs = web_images_map.get(item_id, [])
+        if web_imgs:
+            if len(web_imgs) == 1:
+                st.image(web_imgs[0]["data"], use_container_width=True)
+            else:
+                img_cols = st.columns(min(len(web_imgs), 3))
+                for img_idx, web_img in enumerate(web_imgs):
+                    with img_cols[img_idx % len(img_cols)]:
+                        st.image(web_img["data"], use_container_width=True)
