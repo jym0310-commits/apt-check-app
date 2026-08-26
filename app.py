@@ -32,6 +32,8 @@ WEB_ITEMS_SHEET_NAME = "web_items"
 WEB_IMAGES_SHEET_NAME = "web_images"
 MAX_UPLOAD_IMAGES = 5
 IMAGE_CHUNK_SIZE = 40000
+LEGACY_BUILDING = "204동"
+LEGACY_UNIT = "4503호"
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -82,6 +84,62 @@ st.markdown(
 )
 
 st.title("🏢 해링턴 플레이스 하자 관리 대시보드")
+
+# -------------------------
+# 세대 로그인 (동/호수)
+# -------------------------
+def normalize_building(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return value if value.endswith("동") else f"{value}동"
+
+
+def normalize_unit(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return value if value.endswith("호") else f"{value}호"
+
+
+if "logged_in_unit" not in st.session_state:
+    st.session_state.logged_in_unit = False
+
+if not st.session_state.logged_in_unit:
+    st.markdown("### 🔐 세대 로그인")
+    st.caption("동과 호수만 입력하면 해당 세대의 하자 데이터만 조회·등록·관리합니다.")
+    with st.form("unit_login_form"):
+        lc1, lc2 = st.columns(2)
+        with lc1:
+            login_building_raw = st.text_input("동", placeholder="예: 204 또는 204동")
+        with lc2:
+            login_unit_raw = st.text_input("호수", placeholder="예: 4503 또는 4503호")
+        login_submit = st.form_submit_button("로그인", use_container_width=True)
+
+    if login_submit:
+        login_building = normalize_building(login_building_raw)
+        login_unit = normalize_unit(login_unit_raw)
+        if not login_building or not login_unit:
+            st.error("동과 호수를 모두 입력해 주세요.")
+        else:
+            st.session_state.logged_in_unit = True
+            st.session_state.login_building = login_building
+            st.session_state.login_unit = login_unit
+            st.rerun()
+    st.stop()
+
+CURRENT_BUILDING = st.session_state.get("login_building", LEGACY_BUILDING)
+CURRENT_UNIT = st.session_state.get("login_unit", LEGACY_UNIT)
+
+with st.sidebar:
+    st.markdown("### 🏠 현재 세대")
+    st.success(f"{CURRENT_BUILDING} {CURRENT_UNIT}")
+    if st.button("로그아웃", use_container_width=True):
+        for key in ["logged_in_unit", "login_building", "login_unit"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+st.caption(f"현재 로그인: **{CURRENT_BUILDING} {CURRENT_UNIT}**")
 
 # -------------------------
 # 기존 Excel 데이터 로드
@@ -162,10 +220,19 @@ def get_or_create_worksheet(name, headers, rows=500, cols=10):
     try:
         ws = spreadsheet.worksheet(name)
     except WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
+        ws = spreadsheet.add_worksheet(title=name, rows=rows, cols=max(cols, len(headers)))
         ws.append_row(headers)
-    if not ws.get_all_values():
+    values = ws.get_all_values()
+    if not values:
         ws.append_row(headers)
+    else:
+        # 기존 시트 스키마를 보존하면서 새 컬럼은 오른쪽에만 추가한다.
+        current_headers = [str(x).strip() for x in values[0]]
+        for header in headers:
+            if header not in current_headers:
+                current_headers.append(header)
+        if current_headers != [str(x).strip() for x in values[0]]:
+            ws.update([current_headers], f"A1:{gspread.utils.rowcol_to_a1(1, len(current_headers))}")
     return ws
 
 
@@ -230,9 +297,9 @@ def save_web_status(item_id, new_status, item_label):
 def load_web_items():
     ws = get_or_create_worksheet(
         WEB_ITEMS_SHEET_NAME,
-        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active", "동", "호"],
         rows=500,
-        cols=7,
+        cols=9,
     )
     records = ws.get_all_records()
     rows = []
@@ -242,6 +309,8 @@ def load_web_items():
         item_id = str(r.get("item_id", "")).strip()
         if not item_id:
             continue
+        building = normalize_building(r.get("동", "")) or LEGACY_BUILDING
+        unit = normalize_unit(r.get("호", "")) or LEGACY_UNIT
         rows.append({
             "번호": item_id,
             "공간": str(r.get("공간", "")).strip(),
@@ -252,6 +321,8 @@ def load_web_items():
             "저장된사진파일명": "",
             "데이터출처": "웹등록",
             "등록일시": str(r.get("created_at", "")).strip(),
+            "동": building,
+            "호": unit,
         })
     return pd.DataFrame(rows)
 
@@ -330,16 +401,16 @@ def save_web_images(item_id, uploaded_files):
     load_web_images.clear()
 
 
-def create_web_item(space, part, issue_type, detail, initial_status, uploaded_files):
+def create_web_item(space, part, issue_type, detail, initial_status, uploaded_files, building, unit):
     ws = get_or_create_worksheet(
         WEB_ITEMS_SHEET_NAME,
-        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active", "동", "호"],
         rows=500,
-        cols=7,
+        cols=9,
     )
     now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
     item_id = f"WEB-{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-    ws.append_row([item_id, space, part, issue_type, detail, now, "TRUE"])
+    ws.append_row([item_id, space, part, issue_type, detail, now, "TRUE", building, unit])
     item_label = f"[{item_id}] {space} - {part}"
     save_web_status(item_id, initial_status, item_label)
     save_web_images(item_id, uploaded_files)
@@ -356,9 +427,9 @@ def delete_web_item(item_id):
 
     ws = get_or_create_worksheet(
         WEB_ITEMS_SHEET_NAME,
-        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active", "동", "호"],
         rows=500,
-        cols=7,
+        cols=9,
     )
     values = ws.get_all_values()
     target_row = None
@@ -401,9 +472,13 @@ except Exception as exc:
     web_images_map = {}
     st.warning(f"웹 신규등록 데이터 조회 실패: {type(exc).__name__}: {exc}")
 
-# Excel 데이터에 출처 표시 후 웹 등록 데이터를 병합한다.
+# Excel 원본 데이터는 기존 세대(204동 4503호)의 초기 데이터로 귀속한다.
 df["데이터출처"] = "Excel"
 df["등록일시"] = ""
+df["동"] = LEGACY_BUILDING
+df["호"] = LEGACY_UNIT
+
+# 웹 등록 데이터를 병합한다. 기존에 동/호 컬럼 없이 저장된 웹 데이터도 204동 4503호로 자동 귀속된다.
 if not web_items_df.empty:
     for col in df.columns:
         if col not in web_items_df.columns:
@@ -412,6 +487,9 @@ if not web_items_df.empty:
         if col not in df.columns:
             df[col] = ""
     df = pd.concat([df, web_items_df[df.columns]], ignore_index=True)
+
+# 로그인한 세대의 데이터만 남긴다.
+df = df[(df["동"] == CURRENT_BUILDING) & (df["호"] == CURRENT_UNIT)].copy()
 
 # 각 행에 진행상태를 붙인다. Excel 번호 또는 WEB-... ID를 키로 사용한다.
 df["진행상태"] = df["번호"].apply(
@@ -705,7 +783,7 @@ else:
 # -------------------------
 with st.expander("➕ 새 하자 등록", expanded=False):
     st.caption(
-        "새 항목은 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. "
+        "새 항목은 현재 로그인한 세대에만 저장되며 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. "
         "공간·부위·유형은 원본 Excel에 있는 전체 목록에서 각각 독립적으로 선택하며 사진은 최대 5장까지 첨부할 수 있습니다."
     )
 
@@ -776,6 +854,8 @@ with st.expander("➕ 새 하자 등록", expanded=False):
                     new_detail.strip(),
                     new_initial_status,
                     new_photos or [],
+                    CURRENT_BUILDING,
+                    CURRENT_UNIT,
                 )
                 st.success(f"새 하자가 등록되었습니다. ID: {new_id}")
                 # 다음 등록을 위해 입력값 일부 초기화
@@ -807,10 +887,10 @@ with st.expander("📝 AS 신청서 출력", expanded=False):
             value=datetime.now(ZoneInfo("Asia/Seoul")).strftime("%m/%d"),
             key="as_date",
         )
-        as_building = st.text_input("동", value="204동", key="as_building")
+        as_building = st.text_input("동", value=CURRENT_BUILDING, disabled=True, key="as_building")
     with c2:
         as_manager = st.text_input("매니저명", value="", key="as_manager")
-        as_unit = st.text_input("호", value="4503호", key="as_unit")
+        as_unit = st.text_input("호", value=CURRENT_UNIT, disabled=True, key="as_unit")
     with c3:
         as_phone = st.text_input("전화", value="", key="as_phone")
 
