@@ -105,6 +105,18 @@ if "진행현황" in df.columns:
 else:
     df["진행현황_표시"] = "미지정"
 
+# 새 하자 등록 목록박스는 원본 Excel의 실제 공간/부위/유형 조합을 기준으로 사용한다.
+REFERENCE_DF = df.copy()
+for _col in ["공간", "부위", "유형"]:
+    if _col not in REFERENCE_DF.columns:
+        REFERENCE_DF[_col] = ""
+    REFERENCE_DF[_col] = REFERENCE_DF[_col].fillna("").astype(str).str.strip()
+
+REFERENCE_DF = REFERENCE_DF[
+    (REFERENCE_DF["공간"] != "") & (REFERENCE_DF["부위"] != "")
+].copy()
+REFERENCE_SPACES = sorted(REFERENCE_DF["공간"].dropna().unique().tolist())
+
 # -------------------------
 # 웹 전용 상태: Google Sheet
 # -------------------------
@@ -322,6 +334,35 @@ def create_web_item(space, part, issue_type, detail, initial_status, uploaded_fi
     return item_id
 
 
+def delete_web_item(item_id):
+    """웹에서 새로 등록한 항목만 soft delete(active=FALSE)한다. Excel 원본은 절대 수정하지 않는다."""
+    item_id = str(item_id).strip()
+    if not item_id.startswith("WEB-"):
+        raise ValueError("Excel 원본 항목은 웹에서 삭제할 수 없습니다.")
+
+    ws = get_or_create_worksheet(
+        WEB_ITEMS_SHEET_NAME,
+        ["item_id", "공간", "부위", "유형", "상세내용", "created_at", "active"],
+        rows=500,
+        cols=7,
+    )
+    values = ws.get_all_values()
+    target_row = None
+    for row_num, row in enumerate(values[1:], start=2):
+        if row and str(row[0]).strip() == item_id:
+            target_row = row_num
+            break
+
+    if not target_row:
+        raise ValueError("삭제할 웹 등록 항목을 찾지 못했습니다.")
+
+    # 삭제 이력 복구 가능성을 위해 행/사진은 보존하고 active만 FALSE로 변경한다.
+    ws.update([["FALSE"]], f"G{target_row}")
+    load_web_items.clear()
+    load_web_status.clear()
+    load_web_images.clear()
+
+
 web_status_enabled = True
 web_status_error = None
 try:
@@ -500,40 +541,110 @@ st.caption(f"웹에서 새로 등록한 하자: {web_added_count}건")
 # 웹 신규 하자 등록
 # -------------------------
 with st.expander("➕ 새 하자 등록", expanded=False):
-    st.caption("새 항목은 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. 사진은 최대 5장까지 첨부할 수 있습니다.")
-    with st.form("new_issue_form", clear_on_submit=True):
-        f1, f2 = st.columns(2)
-        with f1:
-            new_space = st.text_input("공간 *", placeholder="예: 거실, 침실1, 주방")
-            new_type = st.text_input("유형", placeholder="예: 파손, 오염, 들뜸")
-        with f2:
-            new_part = st.text_input("부위 *", placeholder="예: 벽지, 문틀, 바닥")
-            new_initial_status = st.selectbox("등록 후 웹 확인상태", WEB_STATUS_OPTIONS, index=2)
-        new_detail = st.text_area("상세내용 *", placeholder="하자 위치와 증상을 자세히 입력해 주세요.", height=110)
-        new_photos = st.file_uploader(
-            "사진 첨부 (최대 5장)",
-            type=["jpg", "jpeg", "png", "webp"],
-            accept_multiple_files=True,
-            help="사진은 Google Sheet에 압축하여 별도 저장됩니다.",
+    st.caption(
+        "새 항목은 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. "
+        "공간 → 부위 → 유형은 원본 Excel에 실제 등록된 조합만 선택할 수 있으며 사진은 최대 5장까지 첨부할 수 있습니다."
+    )
+
+    if not REFERENCE_SPACES:
+        st.error("원본 Excel에서 공간/부위/유형 기준값을 읽지 못했습니다.")
+        new_space = new_part = new_type = ""
+    else:
+        new_space = st.selectbox(
+            "공간 *",
+            REFERENCE_SPACES,
+            key="new_issue_space",
         )
-        submitted = st.form_submit_button("💾 새 하자 등록", use_container_width=True, disabled=not web_status_enabled)
+
+        part_options = sorted(
+            REFERENCE_DF.loc[REFERENCE_DF["공간"] == new_space, "부위"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        new_part = st.selectbox(
+            "부위 *",
+            part_options,
+            key="new_issue_part",
+        ) if part_options else ""
+
+        type_options = sorted(
+            REFERENCE_DF.loc[
+                (REFERENCE_DF["공간"] == new_space) & (REFERENCE_DF["부위"] == new_part),
+                "유형",
+            ]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        type_options = [x for x in type_options if str(x).strip()]
+        new_type = st.selectbox(
+            "유형 *",
+            type_options,
+            key="new_issue_type",
+        ) if type_options else ""
+
+    c_status, c_info = st.columns([1, 2])
+    with c_status:
+        new_initial_status = st.selectbox(
+            "등록 후 웹 확인상태",
+            WEB_STATUS_OPTIONS,
+            index=2,
+            key="new_issue_initial_status",
+        )
+    with c_info:
+        st.info(
+            f"선택 기준: {new_space or '-'} → {new_part or '-'} → {new_type or '-'}",
+            icon="📌",
+        )
+
+    new_detail = st.text_area(
+        "상세내용 *",
+        placeholder="하자 위치와 증상을 자세히 입력해 주세요.",
+        height=110,
+        key="new_issue_detail",
+    )
+    new_photos = st.file_uploader(
+        "사진 첨부 (최대 5장)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        help="사진은 Google Sheet에 압축하여 별도 저장됩니다.",
+        key="new_issue_photos",
+    )
+
+    if new_photos:
+        preview_cols = st.columns(min(len(new_photos), 5))
+        for p_idx, uploaded in enumerate(new_photos[:MAX_UPLOAD_IMAGES]):
+            with preview_cols[p_idx % len(preview_cols)]:
+                st.image(uploaded, caption=f"사진 {p_idx + 1}", use_container_width=True)
+
+    submitted = st.button(
+        "💾 새 하자 등록",
+        use_container_width=True,
+        disabled=not web_status_enabled,
+        key="submit_new_issue",
+    )
 
     if submitted:
-        if not new_space.strip() or not new_part.strip() or not new_detail.strip():
-            st.error("공간, 부위, 상세내용은 필수입니다.")
+        if not new_space or not new_part or not new_type or not new_detail.strip():
+            st.error("공간, 부위, 유형, 상세내용은 모두 필수입니다.")
         elif len(new_photos or []) > MAX_UPLOAD_IMAGES:
             st.error(f"사진은 최대 {MAX_UPLOAD_IMAGES}장까지 첨부할 수 있습니다.")
         else:
             try:
                 new_id = create_web_item(
-                    new_space.strip(),
-                    new_part.strip(),
-                    new_type.strip(),
+                    new_space,
+                    new_part,
+                    new_type,
                     new_detail.strip(),
                     new_initial_status,
                     new_photos or [],
                 )
                 st.success(f"새 하자가 등록되었습니다. ID: {new_id}")
+                # 다음 등록을 위해 입력값 일부 초기화
+                for _key in ["new_issue_detail", "new_issue_photos"]:
+                    if _key in st.session_state:
+                        del st.session_state[_key]
                 st.rerun()
             except Exception as exc:
                 st.error(f"새 하자 등록 실패: {type(exc).__name__}: {exc}")
@@ -689,6 +800,43 @@ for i, (index, row) in enumerate(target_df.iterrows()):
                     st.rerun()
                 except Exception as exc:
                     st.error(f"웹 상태 저장 실패: {exc}")
+
+        # 삭제는 웹에서 신규 등록한 항목에만 제공한다. Excel 원본 항목은 보호한다.
+        if str(row.get("데이터출처", "")) == "웹등록":
+            confirm_key = f"delete_confirm_{item_id}"
+            if st.session_state.get(confirm_key, False):
+                st.warning("이 웹 등록 하자를 목록에서 삭제할까요? 원본 Excel에는 영향이 없습니다.")
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    if st.button(
+                        "🗑️ 정말 삭제",
+                        key=f"delete_yes_{item_id}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            delete_web_item(item_id)
+                            st.session_state.pop(confirm_key, None)
+                            st.toast(f"{item_label} 삭제 완료", icon="🗑️")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"삭제 실패: {type(exc).__name__}: {exc}")
+                with dc2:
+                    if st.button(
+                        "취소",
+                        key=f"delete_no_{item_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+            else:
+                if st.button(
+                    "🗑️ 웹 등록 항목 삭제",
+                    key=f"delete_start_{item_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
 
         file_name = str(row.get("저장된사진파일명", "")).strip()
         if file_name and os.path.exists(file_name):
