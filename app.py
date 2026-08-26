@@ -25,7 +25,8 @@ from gspread.exceptions import WorksheetNotFound
 # -------------------------
 st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
 
-WEB_STATUS_OPTIONS = ["미확인", "확인완료", "재확인필요"]
+WEB_STATUS_OPTIONS = ["미완료", "확인완료"]
+LEGACY_INCOMPLETE_STATUSES = {"미확인", "재확인필요", "미완료", ""}
 WEB_STATUS_SHEET_NAME = "web_status"
 WEB_ITEMS_SHEET_NAME = "web_items"
 WEB_IMAGES_SHEET_NAME = "web_images"
@@ -65,9 +66,8 @@ st.markdown(
         font-weight: 700;
         margin-left: 6px;
     }
-    .status-unchecked { background: #eef1f5; color: #475569; }
+    .status-incomplete { background: #fee2e2; color: #991b1b; }
     .status-checked { background: #dcfce7; color: #166534; }
-    .status-recheck { background: #fef3c7; color: #92400e; }
     .web-status-box {
         border: 1px solid #e5e7eb;
         border-radius: 12px;
@@ -186,8 +186,15 @@ def load_web_status():
     result = {}
     for record in records:
         item_id = str(record.get("item_id", "")).strip()
-        status = str(record.get("web_status", "")).strip()
-        if item_id and status in WEB_STATUS_OPTIONS:
+        raw_status = str(record.get("web_status", "")).strip()
+        # 이전 버전의 `미확인`/`재확인필요` 기록은 삭제하지 않고 모두 `미완료`로 읽는다.
+        if raw_status == "확인완료":
+            status = "확인완료"
+        elif raw_status in LEGACY_INCOMPLETE_STATUSES:
+            status = "미완료"
+        else:
+            status = "미완료"
+        if item_id:
             result[item_id] = {
                 "status": status,
                 "updated_at": str(record.get("updated_at", "")).strip(),
@@ -196,7 +203,9 @@ def load_web_status():
 
 
 def save_web_status(item_id, new_status, item_label):
-    """item_id 기준으로 웹 상태를 insert/update한다. Excel은 건드리지 않는다."""
+    """item_id 기준으로 진행상태를 insert/update한다. Excel은 건드리지 않는다."""
+    if new_status not in WEB_STATUS_OPTIONS:
+        raise ValueError(f"지원하지 않는 진행상태입니다: {new_status}")
     worksheet = get_web_status_worksheet()
     item_id = str(item_id).strip()
     now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -406,7 +415,7 @@ if not web_items_df.empty:
 
 # 각 행에 진행상태를 붙인다. Excel 번호 또는 WEB-... ID를 키로 사용한다.
 df["진행상태"] = df["번호"].apply(
-    lambda x: web_status_map.get(str(x).strip(), {}).get("status", "미확인")
+    lambda x: web_status_map.get(str(x).strip(), {}).get("status", "미완료")
 )
 
 # -------------------------
@@ -640,8 +649,7 @@ def build_as_request_docx(
 # -------------------------
 total = len(df)
 done = int((df["진행상태"] == "확인완료").sum())
-recheck = int((df["진행상태"] == "재확인필요").sum())
-unchecked = int((df["진행상태"] == "미확인").sum())
+incomplete = int((df["진행상태"] == "미완료").sum())
 progress = int((done / total) * 100) if total > 0 else 0
 
 st.markdown(
@@ -658,12 +666,12 @@ st.progress(progress / 100)
 
 d1, d2, d3, d4 = st.columns(4)
 d1.metric("총 하자", f"{total}건")
-d2.metric("확인완료", f"{done}건", delta=f"{progress}%")
-d3.metric("재확인필요", f"{recheck}건")
-d4.metric("미확인", f"{unchecked}건")
+d2.metric("확인완료", f"{done}건")
+d3.metric("미완료", f"{incomplete}건")
+d4.metric("진행률", f"{progress}%")
 
 web_added_count = int((df["데이터출처"] == "웹등록").sum())
-st.caption(f"신규 웹 등록 하자: {web_added_count}건 · 모든 상태는 진행상태로 통합 관리됩니다.")
+st.caption(f"신규 웹 등록 하자: {web_added_count}건 · 모든 하자는 `미완료 / 확인완료` 두 상태로 관리됩니다.")
 
 st.subheader("📍 공간별 진행현황")
 if df.empty:
@@ -674,8 +682,7 @@ else:
         .agg(
             전체=("번호", "count"),
             확인완료=("진행상태", lambda x: int((x == "확인완료").sum())),
-            재확인필요=("진행상태", lambda x: int((x == "재확인필요").sum())),
-            미확인=("진행상태", lambda x: int((x == "미확인").sum())),
+            미완료=("진행상태", lambda x: int((x == "미완료").sum())),
         )
         .reset_index()
     )
@@ -684,10 +691,11 @@ else:
         (space_summary["확인완료"] / space_summary["전체"] * 100)
         .fillna(0).round(0).astype(int)
     )
-    space_summary = space_summary.sort_values(["진행률값", "전체"], ascending=[False, False])
+    # 미완료가 많은 공간을 먼저 확인할 수 있도록 미완료 내림차순, 진행률 오름차순으로 정렬
+    space_summary = space_summary.sort_values(["미완료", "진행률값", "전체"], ascending=[False, True, False])
     space_summary["진행률"] = space_summary["진행률값"].astype(str) + "%"
     st.dataframe(
-        space_summary[["공간", "전체", "확인완료", "재확인필요", "미확인", "진행률"]],
+        space_summary[["공간", "전체", "확인완료", "미완료", "진행률"]],
         use_container_width=True,
         hide_index=True,
     )
@@ -718,7 +726,7 @@ with st.expander("➕ 새 하자 등록", expanded=False):
         new_initial_status = st.selectbox(
             "등록 후 진행상태",
             WEB_STATUS_OPTIONS,
-            index=2,
+            index=0,
             key="new_issue_initial_status",
         )
     with c_info:
@@ -788,7 +796,7 @@ with st.expander("📝 AS 신청서 출력", expanded=False):
     as_statuses = st.multiselect(
         "출력할 진행상태",
         WEB_STATUS_OPTIONS,
-        default=["재확인필요"],
+        default=["미완료"],
         key="as_web_statuses",
     )
 
@@ -867,19 +875,17 @@ cols = st.columns(2)
 for i, (index, row) in enumerate(target_df.iterrows()):
     with cols[i % 2]:
         item_id = str(row["번호"]).strip()
-        current_web_status = str(row.get("진행상태", "미확인") or "미확인")
+        current_web_status = str(row.get("진행상태", "미완료") or "미완료")
         updated_at = web_status_map.get(item_id, {}).get("updated_at", "")
 
         badge_class = {
-            "미확인": "status-unchecked",
+            "미완료": "status-incomplete",
             "확인완료": "status-checked",
-            "재확인필요": "status-recheck",
-        }.get(current_web_status, "status-unchecked")
+        }.get(current_web_status, "status-incomplete")
         status_color = {
             "확인완료": "#27ae60",
-            "재확인필요": "#f59e0b",
-            "미확인": "#64748b",
-        }.get(current_web_status, "#64748b")
+            "미완료": "#ef4444",
+        }.get(current_web_status, "#ef4444")
 
         space_text = str(row.get("공간", ""))
         part_text = str(row.get("부위", ""))
@@ -903,8 +909,22 @@ for i, (index, row) in enumerate(target_df.iterrows()):
         )
 
         # 버튼을 누르는 즉시 Google Sheet에만 저장한다.
-        b1, b2, b3 = st.columns(3)
+        b1, b2 = st.columns(2)
         with b1:
+            if st.button(
+                "❌ 미완료",
+                key=f"incomplete_{item_id}",
+                use_container_width=True,
+                disabled=not web_status_enabled or current_web_status == "미완료",
+            ):
+                try:
+                    save_web_status(item_id, "미완료", item_label)
+                    st.toast(f"{item_label} → 미완료", icon="❌")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"진행상태 저장 실패: {exc}")
+
+        with b2:
             if st.button(
                 "✅ 확인완료",
                 key=f"checked_{item_id}",
@@ -914,34 +934,6 @@ for i, (index, row) in enumerate(target_df.iterrows()):
                 try:
                     save_web_status(item_id, "확인완료", item_label)
                     st.toast(f"{item_label} → 확인완료", icon="✅")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"진행상태 저장 실패: {exc}")
-
-        with b2:
-            if st.button(
-                "⚠️ 재확인",
-                key=f"recheck_{item_id}",
-                use_container_width=True,
-                disabled=not web_status_enabled or current_web_status == "재확인필요",
-            ):
-                try:
-                    save_web_status(item_id, "재확인필요", item_label)
-                    st.toast(f"{item_label} → 재확인필요", icon="⚠️")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"진행상태 저장 실패: {exc}")
-
-        with b3:
-            if st.button(
-                "↩ 미확인",
-                key=f"unchecked_{item_id}",
-                use_container_width=True,
-                disabled=not web_status_enabled or current_web_status == "미확인",
-            ):
-                try:
-                    save_web_status(item_id, "미확인", item_label)
-                    st.toast(f"{item_label} → 미확인", icon="↩️")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"진행상태 저장 실패: {exc}")
