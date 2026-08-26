@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -116,8 +117,19 @@ def get_web_status_worksheet():
 
     service_account_info = get_secret("gcp_service_account")
     if service_account_info:
+        # 기존 Streamlit Secrets 형식 지원:
+        # [gcp_service_account]
+        # json_key = '{"type":"service_account", ...}'
+        service_account_info = dict(service_account_info)
+        if "json_key" in service_account_info:
+            raw_json = service_account_info["json_key"]
+            if isinstance(raw_json, str):
+                service_account_info = json.loads(raw_json)
+            elif isinstance(raw_json, dict):
+                service_account_info = dict(raw_json)
+
         credentials = Credentials.from_service_account_info(
-            dict(service_account_info), scopes=GOOGLE_SCOPES
+            service_account_info, scopes=GOOGLE_SCOPES
         )
     elif os.path.exists("credentials.json"):
         credentials = Credentials.from_service_account_file(
