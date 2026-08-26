@@ -1,4 +1,5 @@
 import glob
+import io
 import json
 import os
 from datetime import datetime
@@ -7,6 +8,9 @@ from zoneinfo import ZoneInfo
 import gspread
 import pandas as pd
 import streamlit as st
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
@@ -218,6 +222,88 @@ df["웹확인상태"] = df["번호"].apply(
 )
 
 # -------------------------
+# AS 신청서 생성 (웹 확인상태 기준)
+# -------------------------
+def build_as_request_docx(source_df, selected_web_statuses):
+    """선택한 웹 확인상태의 항목으로 AS 신청서 Word 파일을 만든다.
+
+    Excel의 진행현황은 출력 참고정보로만 표시하며 대상 선정에는 사용하지 않는다.
+    """
+    selected = source_df[source_df["웹확인상태"].isin(selected_web_statuses)].copy()
+
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.55)
+    section.bottom_margin = Inches(0.55)
+    section.left_margin = Inches(0.6)
+    section.right_margin = Inches(0.6)
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("해링턴 플레이스 AS 신청서")
+    run.bold = True
+    run.font.size = Pt(18)
+
+    meta = doc.add_paragraph()
+    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    meta.add_run(
+        f"출력 기준: 웹 확인상태 ({', '.join(selected_web_statuses)})  |  "
+        f"대상 {len(selected)}건  |  생성일 {datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')}"
+    )
+
+    doc.add_paragraph(
+        "※ AS 신청 대상은 웹 확인상태를 기준으로 선정되었습니다. "
+        "Excel 진행현황은 참고용으로만 표시됩니다."
+    )
+
+    if selected.empty:
+        doc.add_paragraph("선택한 웹 확인상태에 해당하는 하자 항목이 없습니다.")
+    else:
+        for seq, (_, row) in enumerate(selected.iterrows(), start=1):
+            item_id = str(row.get("번호", "")).strip()
+            space_text = str(row.get("공간", "") or "")
+            part_text = str(row.get("부위", "") or "")
+            type_text = str(row.get("유형", "") or "")
+            detail_text = str(row.get("상세내용", "") or "")
+            excel_status = str(row.get("진행현황_표시", "") or "")
+            web_status = str(row.get("웹확인상태", "") or "")
+
+            heading = doc.add_paragraph()
+            r = heading.add_run(f"{seq}. [{item_id}] {space_text} - {part_text}")
+            r.bold = True
+            r.font.size = Pt(12)
+
+            table = doc.add_table(rows=4, cols=2)
+            table.style = "Table Grid"
+            fields = [
+                ("웹 확인상태", web_status),
+                ("Excel 진행현황", excel_status),
+                ("유형", type_text),
+                ("상세내용", detail_text),
+            ]
+            for idx, (label, value) in enumerate(fields):
+                table.cell(idx, 0).text = label
+                table.cell(idx, 1).text = value
+
+            file_name = str(row.get("저장된사진파일명", "") or "").strip()
+            if file_name and os.path.exists(file_name):
+                try:
+                    p_img = doc.add_paragraph()
+                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_img.add_run().add_picture(file_name, width=Inches(4.8))
+                except Exception:
+                    doc.add_paragraph(f"사진 파일: {file_name}")
+
+            if seq != len(selected):
+                doc.add_paragraph("―" * 35)
+
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue(), len(selected)
+
+
+# -------------------------
 # 기존 Excel 진행현황 요약
 # -------------------------
 total = len(df)
@@ -254,6 +340,30 @@ w1, w2, w3 = st.columns(3)
 w1.metric("미확인", f"{web_unchecked}건")
 w2.metric("확인완료", f"{web_checked}건")
 w3.metric("재확인필요", f"{web_recheck}건")
+
+# AS 신청서 출력: Excel 상태가 아니라 웹 확인상태를 기준으로 대상 선정
+with st.expander("📝 AS 신청서 출력", expanded=False):
+    st.caption("AS 신청 대상은 아래에서 선택한 **웹 확인상태** 기준으로 생성됩니다.")
+    as_statuses = st.multiselect(
+        "출력할 웹 확인상태",
+        WEB_STATUS_OPTIONS,
+        default=["재확인필요"],
+        key="as_web_statuses",
+    )
+
+    if as_statuses:
+        as_target_count = int(df["웹확인상태"].isin(as_statuses).sum())
+        st.info(f"현재 AS 신청서 출력 대상: {as_target_count}건")
+        as_docx_bytes, _ = build_as_request_docx(df, as_statuses)
+        st.download_button(
+            "📄 AS 신청서 다운로드 (.docx)",
+            data=as_docx_bytes,
+            file_name=f"AS신청서_웹상태_{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d_%H%M')}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+    else:
+        st.warning("출력할 웹 확인상태를 하나 이상 선택해 주세요.")
 
 st.markdown("---")
 
