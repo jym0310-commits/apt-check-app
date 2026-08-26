@@ -1,4 +1,4 @@
-import base64
+mport base64
 import glob
 import hashlib
 import secrets as pysecrets
@@ -36,6 +36,7 @@ WEB_STATUS_SHEET_NAME = "web_status"
 WEB_ITEMS_SHEET_NAME = "web_items"
 WEB_IMAGES_SHEET_NAME = "web_images"
 UNIT_ACCOUNTS_SHEET_NAME = "unit_accounts"
+# pin_mode가 custom인 경우에만 변경 PIN을 사용합니다. 기존 행(pin_mode 없음)은 초기 PIN 상태로 간주합니다.
 MAX_UPLOAD_IMAGES = 5
 IMAGE_CHUNK_SIZE = 40000
 LEGACY_BUILDING = "204동"
@@ -198,6 +199,15 @@ def normalize_unit(value):
     return value if value.endswith("호") else f"{value}호"
 
 
+def get_initial_pin(building, unit):
+    """세대 초기 PIN: 동 숫자 + 호수 숫자 (예: 204동 4503호 -> 2044503)."""
+    building_digits = "".join(ch for ch in str(building or "") if ch.isdigit())
+    unit_digits = "".join(ch for ch in str(unit or "") if ch.isdigit())
+    if not building_digits or not unit_digits:
+        return ""
+    return f"{building_digits}{unit_digits}"
+
+
 # -------------------------
 # PIN 인증용 Google Sheet 연결
 # -------------------------
@@ -234,7 +244,7 @@ def get_auth_spreadsheet():
 
 def get_unit_accounts_worksheet():
     spreadsheet = get_auth_spreadsheet()
-    headers = ["동", "호", "pin_salt", "pin_hash", "updated_at"]
+    headers = ["동", "호", "pin_salt", "pin_hash", "updated_at", "pin_mode"]
     try:
         ws = spreadsheet.worksheet(UNIT_ACCOUNTS_SHEET_NAME)
     except WorksheetNotFound:
@@ -268,6 +278,7 @@ def load_unit_accounts():
             "unit": u,
             "pin_salt": str(r.get("pin_salt", "") or "").strip(),
             "pin_hash": str(r.get("pin_hash", "") or "").strip(),
+            "pin_mode": str(r.get("pin_mode", "") or "").strip().lower(),
         }
     return result
 
@@ -278,19 +289,28 @@ def _hash_pin(pin, salt_hex):
 
 
 def unit_has_pin(building, unit):
+    """사용자가 최초 로그인 후 직접 변경한 PIN이 있는지 확인합니다."""
     rec = load_unit_accounts().get(f"{building}|{unit}")
-    return bool(rec and rec.get("pin_salt") and rec.get("pin_hash"))
+    return bool(
+        rec
+        and rec.get("pin_mode") == "custom"
+        and rec.get("pin_salt")
+        and rec.get("pin_hash")
+    )
 
 
 def verify_unit_pin(building, unit, pin):
+    """변경 PIN이 있으면 그것을, 없으면 동+호수 초기 PIN을 검증합니다."""
     rec = load_unit_accounts().get(f"{building}|{unit}")
-    if not rec or not rec.get("pin_salt") or not rec.get("pin_hash"):
-        return False
-    try:
-        candidate = _hash_pin(pin, rec["pin_salt"])
-        return pysecrets.compare_digest(candidate, rec["pin_hash"])
-    except Exception:
-        return False
+    if rec and rec.get("pin_mode") == "custom" and rec.get("pin_salt") and rec.get("pin_hash"):
+        try:
+            candidate = _hash_pin(pin, rec["pin_salt"])
+            return pysecrets.compare_digest(candidate, rec["pin_hash"])
+        except Exception:
+            return False
+
+    initial_pin = get_initial_pin(building, unit)
+    return bool(initial_pin) and pysecrets.compare_digest(str(pin), initial_pin)
 
 
 def save_unit_pin(building, unit, pin):
@@ -313,15 +333,15 @@ def save_unit_pin(building, unit, pin):
             if b == building and u == unit:
                 target_row = i
                 break
-    row_data = [[building, unit, salt_hex, pin_hash, now]]
+    row_data = [[building, unit, salt_hex, pin_hash, now, "custom"]]
     if target_row:
-        ws.update(row_data, f"A{target_row}:E{target_row}")
+        ws.update(row_data, f"A{target_row}:F{target_row}")
     else:
         ws.append_row(row_data[0])
     load_unit_accounts.clear()
 
 def reset_unit_pin(building, unit):
-    """관리자용: 해당 세대 PIN 해시를 제거해 최초 로그인 상태로 되돌립니다."""
+    """관리자용: 변경 PIN을 제거해 동+호수 규칙의 초기 PIN으로 되돌립니다."""
     ws = get_unit_accounts_worksheet()
     values = ws.get_all_values()
     if not values:
@@ -337,21 +357,24 @@ def reset_unit_pin(building, unit):
     salt_idx = headers.index("pin_salt") if "pin_salt" in headers else 2
     hash_idx = headers.index("pin_hash") if "pin_hash" in headers else 3
     updated_idx = headers.index("updated_at") if "updated_at" in headers else 4
+    mode_idx = headers.index("pin_mode") if "pin_mode" in headers else 5
 
     for row_no, row in enumerate(values[1:], start=2):
         b = normalize_building(row[b_idx] if b_idx < len(row) else "")
         u = normalize_unit(row[u_idx] if u_idx < len(row) else "")
         if b == building and u == unit:
             now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
-            max_col = max(salt_idx, hash_idx, updated_idx) + 1
+            max_col = max(salt_idx, hash_idx, updated_idx, mode_idx) + 1
             padded = list(row) + [""] * max(0, max_col - len(row))
             padded[salt_idx] = ""
             padded[hash_idx] = ""
             padded[updated_idx] = now
+            padded[mode_idx] = "initial"
             ws.update([padded[:max_col]], f"A{row_no}:{gspread.utils.rowcol_to_a1(row_no, max_col)}")
             load_unit_accounts.clear()
             return True
-    return False
+    # 저장된 변경 PIN이 없으면 이미 초기 PIN 상태입니다.
+    return True
 
 
 def admin_password_ok(password):
@@ -430,20 +453,33 @@ if not st.session_state.logged_in_unit:
 
     if pending_building and pending_unit:
         st.markdown(f"**{html.escape(pending_building)} {html.escape(pending_unit)}**")
-        st.caption("이 세대는 PIN이 설정되어 있습니다. PIN을 입력해 주세요.")
+        try:
+            _has_custom_pin = unit_has_pin(pending_building, pending_unit)
+        except Exception:
+            _has_custom_pin = False
+        if _has_custom_pin:
+            st.caption("변경한 PIN을 입력해 주세요.")
+            _pin_placeholder = "변경한 4자리 PIN"
+        else:
+            st.caption("최초 접속은 초기 PIN(동+호수 숫자)을 입력해 주세요. 로그인 후 새 PIN으로 변경합니다.")
+            _pin_placeholder = f"예: {get_initial_pin(pending_building, pending_unit)}"
         with st.form("unit_pin_login_form"):
-            login_pin = st.text_input("PIN", type="password", placeholder="설정한 4자리 PIN", max_chars=4)
+            login_pin = st.text_input("PIN", type="password", placeholder=_pin_placeholder, max_chars=12)
             pin_submit = st.form_submit_button("로그인", use_container_width=True, type="primary")
         if st.button("다른 동·호수 입력", use_container_width=True):
             st.session_state.pop("pending_login_building", None)
             st.session_state.pop("pending_login_unit", None)
             st.rerun()
         if pin_submit:
-            if not (login_pin.isdigit() and len(login_pin) == 4):
-                st.error("4자리 숫자 PIN을 입력해 주세요.")
+            if not login_pin.isdigit():
+                st.error("숫자 PIN을 입력해 주세요.")
             elif not verify_unit_pin(pending_building, pending_unit, login_pin):
                 st.error("PIN이 올바르지 않습니다.")
             else:
+                try:
+                    _logged_in_with_initial_pin = not unit_has_pin(pending_building, pending_unit)
+                except Exception:
+                    _logged_in_with_initial_pin = False
                 admitted, active_count = claim_active_unit(pending_building, pending_unit)
                 if not admitted:
                     st.warning(
@@ -455,6 +491,7 @@ if not st.session_state.logged_in_unit:
                     st.session_state.logged_in_unit = True
                     st.session_state.login_building = pending_building
                     st.session_state.login_unit = pending_unit
+                    st.session_state.pin_change_required = _logged_in_with_initial_pin
                     st.session_state.pop("pending_login_building", None)
                     st.session_state.pop("pending_login_unit", None)
                     st.rerun()
@@ -473,33 +510,14 @@ if not st.session_state.logged_in_unit:
             if not login_building or not login_unit:
                 st.error("동과 호수를 모두 입력해 주세요.")
             else:
-                try:
-                    has_pin = unit_has_pin(login_building, login_unit)
-                except Exception as exc:
-                    st.error(f"PIN 정보를 확인하지 못했습니다: {exc}")
-                    st.stop()
-
-                if has_pin:
-                    st.session_state.pending_login_building = login_building
-                    st.session_state.pending_login_unit = login_unit
-                    st.rerun()
-                else:
-                    admitted, active_count = claim_active_unit(login_building, login_unit)
-                    if not admitted:
-                        st.warning(
-                            f"현재 접속자가 많습니다. 잠시 후 다시 접속해 주세요. "
-                            f"(최대 동시 접속 {MAX_ACTIVE_UNITS}세대)"
-                        )
-                        st.caption("10분 동안 활동이 없는 세대는 자동으로 접속 자리에서 제외됩니다.")
-                    else:
-                        st.session_state.logged_in_unit = True
-                        st.session_state.login_building = login_building
-                        st.session_state.login_unit = login_unit
-                        st.rerun()
+                # 모든 세대는 PIN 인증을 거칩니다. 변경 PIN이 없으면 동+호수 규칙의 초기 PIN을 사용합니다.
+                st.session_state.pending_login_building = login_building
+                st.session_state.pending_login_unit = login_unit
+                st.rerun()
 
     st.markdown("---")
     with st.expander("⚙️ 관리자 PIN 초기화", expanded=False):
-        st.caption("PIN을 잊어버린 세대의 PIN만 초기화합니다. 하자 데이터는 삭제되지 않습니다.")
+        st.caption("PIN을 잊어버린 세대의 변경 PIN을 초기화합니다. 하자 데이터는 삭제되지 않으며 PIN은 동+호수 초기값으로 돌아갑니다.")
         with st.form("admin_pin_reset_login_form"):
             ac1, ac2 = st.columns(2)
             with ac1:
@@ -521,7 +539,7 @@ if not st.session_state.logged_in_unit:
             else:
                 try:
                     if reset_unit_pin(target_b, target_u):
-                        st.success(f"{target_b} {target_u}의 PIN을 초기화했습니다. 다음 로그인은 동·호수만으로 가능합니다.")
+                        st.success(f"{target_b} {target_u}의 PIN을 초기화했습니다. 다음 로그인은 동+호수 초기 PIN을 사용합니다.")
                     else:
                         st.info("해당 세대에 설정된 PIN 계정을 찾지 못했습니다.")
                 except Exception as exc:
@@ -531,6 +549,42 @@ if not st.session_state.logged_in_unit:
 CURRENT_BUILDING = st.session_state.get("login_building", LEGACY_BUILDING)
 CURRENT_UNIT = st.session_state.get("login_unit", LEGACY_UNIT)
 ACTIVE_UNIT_COUNT = touch_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
+
+# 초기 PIN으로 최초 로그인한 경우, 새 4자리 PIN을 설정해야 관리 화면을 사용할 수 있습니다.
+if st.session_state.get("pin_change_required", False):
+    st.markdown(
+        f"""
+        <div class="login-shell">
+          <div class="login-logo">✓</div>
+          <div class="login-title">초기 PIN 변경</div>
+          <div class="login-copy">{html.escape(CURRENT_BUILDING)} {html.escape(CURRENT_UNIT)}의 최초 로그인입니다.<br>계속 사용하려면 새 4자리 PIN을 설정해 주세요.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("forced_initial_pin_change_form"):
+        new_pin1 = st.text_input("새 PIN", type="password", max_chars=4, placeholder="4자리 숫자")
+        new_pin2 = st.text_input("새 PIN 확인", type="password", max_chars=4, placeholder="한 번 더 입력")
+        forced_change_submit = st.form_submit_button("새 PIN 저장 후 시작", use_container_width=True, type="primary")
+    if forced_change_submit:
+        if not (new_pin1.isdigit() and len(new_pin1) == 4):
+            st.error("새 PIN은 4자리 숫자로 설정해 주세요.")
+        elif new_pin1 != new_pin2:
+            st.error("PIN 확인 값이 일치하지 않습니다.")
+        else:
+            try:
+                save_unit_pin(CURRENT_BUILDING, CURRENT_UNIT, new_pin1)
+                st.session_state.pin_change_required = False
+                st.success("새 PIN이 저장되었습니다.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"PIN 저장에 실패했습니다: {exc}")
+    if st.button("로그아웃", key="forced_pin_logout", use_container_width=True):
+        release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
+        for key in ["logged_in_unit", "login_building", "login_unit", "pending_login_building", "pending_login_unit", "pin_change_required"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+    st.stop()
 
 with st.sidebar:
     st.markdown("### 현재 세대")
@@ -544,7 +598,7 @@ with st.sidebar:
 
     if not _pin_is_set:
         with st.expander("🔒 PIN 설정", expanded=True):
-            st.caption("PIN을 설정하면 다음 로그인부터 동·호수와 PIN이 필요합니다.")
+            st.caption("현재 동+호수 초기 PIN 상태입니다. 새 4자리 PIN으로 변경해 주세요.")
             with st.form("set_unit_pin_form"):
                 pin1 = st.text_input("새 PIN", type="password", max_chars=4, placeholder="4자리 숫자")
                 pin2 = st.text_input("PIN 확인", type="password", max_chars=4, placeholder="한 번 더 입력")
@@ -557,7 +611,7 @@ with st.sidebar:
                 else:
                     try:
                         save_unit_pin(CURRENT_BUILDING, CURRENT_UNIT, pin1)
-                        st.success("PIN이 설정되었습니다. 다음 로그인부터 PIN을 입력해 주세요.")
+                        st.success("새 PIN이 설정되었습니다. 다음 로그인부터 변경한 PIN을 입력해 주세요.")
                         st.rerun()
                     except Exception as exc:
                         st.error(f"PIN 저장에 실패했습니다: {exc}")
@@ -584,7 +638,7 @@ with st.sidebar:
                         st.error(f"PIN 변경에 실패했습니다: {exc}")
 
     with st.expander("⚙️ 관리자"):
-        st.caption("세대 PIN을 잊어버린 경우 관리자 권한으로 초기화할 수 있습니다.")
+        st.caption("세대 PIN을 잊어버린 경우 관리자 권한으로 동+호수 초기 PIN으로 되돌릴 수 있습니다.")
         with st.form("admin_pin_reset_sidebar_form"):
             sb1, sb2 = st.columns(2)
             with sb1:
@@ -613,7 +667,7 @@ with st.sidebar:
 
     if st.button("로그아웃", use_container_width=True):
         release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
-        for key in ["logged_in_unit", "login_building", "login_unit", "pending_login_building", "pending_login_unit"]:
+        for key in ["logged_in_unit", "login_building", "login_unit", "pending_login_building", "pending_login_unit", "pin_change_required"]:
             st.session_state.pop(key, None)
         st.rerun()
 
