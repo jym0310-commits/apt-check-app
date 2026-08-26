@@ -1,5 +1,6 @@
 import base64
 import glob
+import html
 import io
 import json
 import os
@@ -23,7 +24,7 @@ from gspread.exceptions import WorksheetNotFound
 # -------------------------
 # 기본 설정
 # -------------------------
-st.set_page_config(layout="wide", page_title="해링턴 하자 관리 시스템")
+st.set_page_config(layout="wide", page_title="해링턴 하자 관리", page_icon="✓", initial_sidebar_state="collapsed")
 
 WEB_STATUS_OPTIONS = ["미완료", "확인완료"]
 LEGACY_INCOMPLETE_STATUSES = {"미확인", "재확인필요", "미완료", ""}
@@ -42,48 +43,116 @@ GOOGLE_SCOPES = [
 st.markdown(
     """
     <style>
-    .summary-card {
-        background: #1B2845;
-        color: #ffffff;
-        padding: 20px;
-        border-radius: 15px;
-        text-align: center;
-        margin-bottom: 20px;
+    :root {
+        --ink: #0a0a0a;
+        --body: #737373;
+        --mute: #a3a3a3;
+        --canvas: #ffffff;
+        --soft: #fafafa;
+        --line: #e5e5e5;
+        --line-strong: #d4d4d4;
+        --dark: #171717;
     }
-    .card {
-        background: #ffffff;
-        padding: 25px;
-        border-radius: 15px;
-        border-left: 10px solid #1B2845;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.08);
-        margin-bottom: 10px;
-        color: #333333;
+
+    html, body, [class*="css"] {
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
     }
-    .card h3 { color: #1B2845; }
-    .status-badge {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 999px;
-        font-size: 0.9rem;
-        font-weight: 700;
-        margin-left: 6px;
+    .stApp { background: var(--canvas); }
+    .block-container { max-width: 1180px; padding-top: 2.1rem; padding-bottom: 5rem; }
+    header[data-testid="stHeader"] { background: rgba(255,255,255,.96); border-bottom: 1px solid var(--line); }
+    [data-testid="stSidebar"] { background: var(--soft); border-right: 1px solid var(--line); }
+
+    h1, h2, h3 { letter-spacing: -0.025em; color: var(--ink); }
+    h1 { font-size: 2.15rem !important; font-weight: 600 !important; }
+    h2 { font-size: 1.55rem !important; font-weight: 600 !important; }
+    h3 { font-size: 1.05rem !important; font-weight: 600 !important; }
+    p, .stCaption { color: var(--body); }
+
+    .app-nav {
+        display:flex; align-items:center; justify-content:space-between; gap:16px;
+        padding: 4px 0 28px 0; margin-bottom: 22px; border-bottom:1px solid var(--line);
     }
-    .status-incomplete { background: #fee2e2; color: #991b1b; }
-    .status-checked { background: #dcfce7; color: #166534; }
-    .web-status-box {
-        border: 1px solid #e5e7eb;
-        border-radius: 12px;
-        padding: 10px 12px;
-        margin: 0 0 14px 0;
-        background: #fafafa;
+    .brand-wrap { display:flex; align-items:center; gap:12px; }
+    .brand-mark {
+        width:34px; height:34px; border-radius:999px; background:var(--ink); color:white;
+        display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:700;
     }
-    .stSelectbox { border: 1px solid #1B2845; }
+    .brand-title { font-size:15px; font-weight:650; color:var(--ink); line-height:1.2; }
+    .brand-sub { font-size:12px; color:var(--mute); margin-top:2px; }
+    .unit-pill {
+        display:inline-flex; align-items:center; gap:7px; padding:8px 14px; border:1px solid var(--line);
+        border-radius:999px; background:white; font-size:13px; font-weight:600; color:var(--ink);
+    }
+
+    .hero { padding: 28px 0 34px 0; }
+    .eyebrow { font-size:13px; color:var(--body); margin-bottom:10px; font-weight:600; }
+    .hero-title { font-size:36px; line-height:1.16; font-weight:600; letter-spacing:-0.035em; margin:0; color:var(--ink); }
+    .hero-copy { max-width:680px; margin-top:12px; font-size:15px; line-height:1.65; color:var(--body); }
+
+    .login-shell { max-width:680px; margin:8vh auto 0 auto; text-align:center; }
+    .login-logo {
+        width:54px; height:54px; border-radius:999px; background:var(--ink); color:white;
+        display:flex; align-items:center; justify-content:center; margin:0 auto 24px auto; font-size:25px; font-weight:700;
+    }
+    .login-title { font-size:36px; font-weight:600; line-height:1.12; letter-spacing:-0.04em; margin-bottom:12px; }
+    .login-copy { color:var(--body); font-size:15px; margin:0 auto 28px auto; max-width:520px; line-height:1.65; }
+
+    .section-label { font-size:20px; font-weight:600; letter-spacing:-.025em; margin:42px 0 14px 0; }
+    .section-caption { color:var(--body); font-size:13px; margin-top:-7px; margin-bottom:16px; }
+
+    .kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:18px 0 12px 0; }
+    .kpi-card { border:1px solid var(--line); border-radius:12px; padding:18px 18px 16px; background:white; }
+    .kpi-label { font-size:12px; color:var(--body); margin-bottom:8px; }
+    .kpi-value { font-size:27px; line-height:1; font-weight:650; letter-spacing:-.035em; color:var(--ink); }
+    .kpi-meta { font-size:11px; color:var(--mute); margin-top:8px; }
+    .progress-shell { width:100%; height:8px; background:#f0f0f0; border-radius:999px; overflow:hidden; margin-top:14px; }
+    .progress-fill { height:100%; background:var(--ink); border-radius:999px; }
+
+    .issue-card {
+        background:white; padding:20px; border-radius:12px; border:1px solid var(--line); margin-bottom:10px; color:var(--ink);
+    }
+    .issue-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+    .issue-id { font-size:11px; color:var(--mute); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom:6px; }
+    .issue-title { font-size:17px; font-weight:650; letter-spacing:-.02em; margin:0; }
+    .issue-detail { font-size:13px; line-height:1.6; color:var(--body); margin:12px 0 0; }
+    .status-badge { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:650; white-space:nowrap; }
+    .status-incomplete { background:#f5f5f5; color:#525252; border:1px solid #e5e5e5; }
+    .status-checked { background:#171717; color:#fff; border:1px solid #171717; }
+    .status-meta { font-size:11px; color:var(--mute); margin-top:10px; }
+
+    div[data-testid="stForm"] { border:1px solid var(--line) !important; border-radius:12px !important; padding:22px !important; background:white; }
+    div[data-testid="stExpander"] { border:1px solid var(--line) !important; border-radius:12px !important; background:white !important; box-shadow:none !important; }
+    div[data-testid="stExpander"] details summary { font-weight:600; }
+    div[data-baseweb="select"] > div, .stTextInput input, .stTextArea textarea {
+        border-color:var(--line-strong) !important; border-radius:12px !important; box-shadow:none !important;
+    }
+    .stTextInput input { min-height:42px; }
+    .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+        border-radius:999px !important; border:1px solid var(--line-strong) !important; background:white !important; color:var(--ink) !important;
+        font-weight:600 !important; min-height:40px; box-shadow:none !important;
+    }
+    .stButton > button[kind="primary"], .stFormSubmitButton > button { background:var(--ink) !important; color:white !important; border-color:var(--ink) !important; }
+    .stDownloadButton > button { background:var(--ink) !important; color:white !important; border-color:var(--ink) !important; }
+    .stButton > button:disabled { background:var(--soft) !important; color:var(--mute) !important; border-color:var(--line) !important; }
+    [data-testid="stFileUploaderDropzone"] { border:1px dashed var(--line-strong) !important; border-radius:12px !important; background:var(--soft) !important; }
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+    [data-testid="stAlert"] { border-radius:12px !important; box-shadow:none !important; }
+    hr { border:none !important; border-top:1px solid var(--line) !important; margin:40px 0 !important; }
+
+    @media (max-width: 760px) {
+        .block-container { padding: 1rem 1rem 4rem 1rem; }
+        .app-nav { padding-bottom:18px; margin-bottom:10px; }
+        .hero { padding:20px 0 24px 0; }
+        .hero-title, .login-title { font-size:28px; }
+        .kpi-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+        .unit-pill { font-size:12px; padding:7px 11px; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("🏢 해링턴 플레이스 하자 관리 대시보드")
 
 # -------------------------
 # 세대 로그인 (동/호수)
@@ -106,15 +175,23 @@ if "logged_in_unit" not in st.session_state:
     st.session_state.logged_in_unit = False
 
 if not st.session_state.logged_in_unit:
-    st.markdown("### 🔐 세대 로그인")
-    st.caption("동과 호수만 입력하면 해당 세대의 하자 데이터만 조회·등록·관리합니다.")
+    st.markdown(
+        """
+        <div class="login-shell">
+          <div class="login-logo">✓</div>
+          <div class="login-title">우리 집 하자를<br>한 곳에서 관리하세요.</div>
+          <div class="login-copy">동과 호수만 입력하면 해당 세대의 하자 목록, 진행상태, 사진과 A/S 신청서를 한 화면에서 관리할 수 있습니다.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     with st.form("unit_login_form"):
         lc1, lc2 = st.columns(2)
         with lc1:
             login_building_raw = st.text_input("동", placeholder="예: 204 또는 204동")
         with lc2:
             login_unit_raw = st.text_input("호수", placeholder="예: 4503 또는 4503호")
-        login_submit = st.form_submit_button("로그인", use_container_width=True)
+        login_submit = st.form_submit_button("세대 관리 시작", use_container_width=True, type="primary")
 
     if login_submit:
         login_building = normalize_building(login_building_raw)
@@ -132,14 +209,31 @@ CURRENT_BUILDING = st.session_state.get("login_building", LEGACY_BUILDING)
 CURRENT_UNIT = st.session_state.get("login_unit", LEGACY_UNIT)
 
 with st.sidebar:
-    st.markdown("### 🏠 현재 세대")
-    st.success(f"{CURRENT_BUILDING} {CURRENT_UNIT}")
+    st.markdown("### 현재 세대")
+    st.markdown(f"**{CURRENT_BUILDING} {CURRENT_UNIT}**")
+    st.caption("이 세대의 데이터만 표시됩니다.")
     if st.button("로그아웃", use_container_width=True):
         for key in ["logged_in_unit", "login_building", "login_unit"]:
             st.session_state.pop(key, None)
         st.rerun()
 
-st.caption(f"현재 로그인: **{CURRENT_BUILDING} {CURRENT_UNIT}**")
+st.markdown(
+    f"""
+    <div class="app-nav">
+      <div class="brand-wrap">
+        <div class="brand-mark">✓</div>
+        <div><div class="brand-title">해링턴 하자관리</div><div class="brand-sub">Home inspection workspace</div></div>
+      </div>
+      <div class="unit-pill">{html.escape(CURRENT_BUILDING)} · {html.escape(CURRENT_UNIT)}</div>
+    </div>
+    <div class="hero">
+      <div class="eyebrow">세대 하자 관리 대시보드</div>
+      <div class="hero-title">처리할 하자는 선명하게,<br>완료한 항목은 간단하게.</div>
+      <div class="hero-copy">현재 세대의 하자 등록, 진행상태 확인, 사진 관리와 A/S 신청서 출력을 한 화면에서 처리할 수 있습니다.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # -------------------------
 # 기존 Excel 데이터 로드
@@ -732,26 +826,20 @@ progress = int((done / total) * 100) if total > 0 else 0
 
 st.markdown(
     f"""
-    <div class='summary-card'>
-        <h3>전체 하자 진행현황</h3>
-        <div style='font-size: 40px; font-weight: bold;'>{done} / {total} 건</div>
-        <p>확인완료 기준 진행률 {progress}%</p>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">총 하자</div><div class="kpi-value">{total}</div><div class="kpi-meta">현재 세대 전체 항목</div></div>
+      <div class="kpi-card"><div class="kpi-label">확인완료</div><div class="kpi-value">{done}</div><div class="kpi-meta">처리 확인된 항목</div></div>
+      <div class="kpi-card"><div class="kpi-label">미완료</div><div class="kpi-value">{incomplete}</div><div class="kpi-meta">추가 조치가 필요한 항목</div></div>
+      <div class="kpi-card"><div class="kpi-label">진행률</div><div class="kpi-value">{progress}%</div><div class="progress-shell"><div class="progress-fill" style="width:{progress}%"></div></div></div>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.progress(progress / 100)
-
-d1, d2, d3, d4 = st.columns(4)
-d1.metric("총 하자", f"{total}건")
-d2.metric("확인완료", f"{done}건")
-d3.metric("미완료", f"{incomplete}건")
-d4.metric("진행률", f"{progress}%")
 
 web_added_count = int((df["데이터출처"] == "웹등록").sum())
-st.caption(f"신규 웹 등록 하자: {web_added_count}건 · 모든 하자는 `미완료 / 확인완료` 두 상태로 관리됩니다.")
+st.caption(f"웹에서 추가한 하자 {web_added_count}건 · 진행상태는 미완료 / 확인완료 두 단계로 관리합니다.")
 
-st.subheader("📍 공간별 진행현황")
+st.markdown('<div class="section-label">공간별 진행현황</div><div class="section-caption">미완료 항목이 많은 공간부터 표시합니다.</div>', unsafe_allow_html=True)
 if df.empty:
     st.info("표시할 하자 데이터가 없습니다.")
 else:
@@ -781,7 +869,7 @@ else:
 # -------------------------
 # 웹 신규 하자 등록
 # -------------------------
-with st.expander("➕ 새 하자 등록", expanded=False):
+with st.expander("새 하자 등록", expanded=False):
     st.caption(
         "새 항목은 현재 로그인한 세대에만 저장되며 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. "
         "공간·부위·유형은 원본 Excel에 있는 전체 목록에서 각각 독립적으로 선택하며 사진은 최대 5장까지 첨부할 수 있습니다."
@@ -834,10 +922,11 @@ with st.expander("➕ 새 하자 등록", expanded=False):
                 st.image(uploaded, caption=f"사진 {p_idx + 1}", use_container_width=True)
 
     submitted = st.button(
-        "💾 새 하자 등록",
+        "새 하자 등록",
         use_container_width=True,
         disabled=not web_status_enabled,
         key="submit_new_issue",
+        type="primary",
     )
 
     if submitted:
@@ -867,7 +956,7 @@ with st.expander("➕ 새 하자 등록", expanded=False):
                 st.error(f"새 하자 등록 실패: {type(exc).__name__}: {exc}")
 
 # AS 신청서 출력: 진행상태 기준
-with st.expander("📝 AS 신청서 출력", expanded=False):
+with st.expander("A/S 신청서 출력", expanded=False):
     st.caption(
         "첨부해주신 기존 A/S 신청서처럼 `날짜/매니저명/전달사항`, 세대정보, "
         "`NO/실/내용/공종` 표와 사진이 함께 출력됩니다."
@@ -911,7 +1000,7 @@ with st.expander("📝 AS 신청서 출력", expanded=False):
             phone=as_phone,
         )
         st.download_button(
-            "📄 AS 신청서 다운로드 (.docx)",
+            "A/S 신청서 다운로드 (.docx)",
             data=as_docx_bytes,
             file_name=f"AS신청서_{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d_%H%M')}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -922,10 +1011,12 @@ with st.expander("📝 AS 신청서 출력", expanded=False):
 
 st.markdown("---")
 
+st.markdown('<div class="section-label">하자 목록</div><div class="section-caption">공간과 진행상태를 선택해 필요한 항목만 빠르게 확인하세요.</div>', unsafe_allow_html=True)
+
 # -------------------------
 # 평면도 / 필터
 # -------------------------
-with st.expander("🗺️ 공간 위치 확인 (평면도)"):
+with st.expander("공간 위치 확인 (평면도)"):
     if os.path.exists("image_5012c2.jpg"):
         st.image("image_5012c2.jpg", use_container_width=True)
     else:
@@ -973,16 +1064,23 @@ for i, (index, row) in enumerate(target_df.iterrows()):
         detail_text = str(row.get("상세내용", ""))
         item_label = f"[{item_id}] {space_text} - {part_text}"
 
+        safe_id = html.escape(item_id)
+        safe_title = html.escape(f"{space_text} · {part_text}")
+        safe_type = html.escape(type_text)
+        safe_detail = html.escape(detail_text)
+        safe_updated = html.escape(str(updated_at))
         st.markdown(
             f"""
-            <div class='card' style='border-left-color: {status_color};'>
-                <h3>{item_label}</h3>
-                <p><b>상세:</b> {type_text} / {detail_text}</p>
-            </div>
-            <div class='web-status-box'>
-                <b>진행상태:</b>
-                <span class='status-badge {badge_class}'>{current_web_status}</span>
-                {f"<div style='font-size:0.78rem;color:#64748b;margin-top:5px;'>마지막 변경: {updated_at}</div>" if updated_at else ""}
+            <div class="issue-card">
+              <div class="issue-head">
+                <div>
+                  <div class="issue-id">#{safe_id}</div>
+                  <div class="issue-title">{safe_title}</div>
+                </div>
+                <span class="status-badge {badge_class}">{html.escape(current_web_status)}</span>
+              </div>
+              <div class="issue-detail"><b>{safe_type}</b> · {safe_detail}</div>
+              {f'<div class="status-meta">마지막 변경 · {safe_updated}</div>' if updated_at else ''}
             </div>
             """,
             unsafe_allow_html=True,
