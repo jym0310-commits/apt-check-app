@@ -11,8 +11,11 @@ import gspread
 import pandas as pd
 import streamlit as st
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm, Inches, Pt
 from PIL import Image, ImageOps
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
@@ -113,9 +116,11 @@ for _col in ["공간", "부위", "유형"]:
     REFERENCE_DF[_col] = REFERENCE_DF[_col].fillna("").astype(str).str.strip()
 
 REFERENCE_DF = REFERENCE_DF[
-    (REFERENCE_DF["공간"] != "") & (REFERENCE_DF["부위"] != "")
+    (REFERENCE_DF["공간"] != "") | (REFERENCE_DF["부위"] != "") | (REFERENCE_DF["유형"] != "")
 ].copy()
-REFERENCE_SPACES = sorted(REFERENCE_DF["공간"].dropna().unique().tolist())
+REFERENCE_SPACES = sorted([x for x in REFERENCE_DF["공간"].dropna().unique().tolist() if str(x).strip()])
+REFERENCE_PARTS = sorted([x for x in REFERENCE_DF["부위"].dropna().unique().tolist() if str(x).strip()])
+REFERENCE_TYPES = sorted([x for x in REFERENCE_DF["유형"].dropna().unique().tolist() if str(x).strip()])
 
 # -------------------------
 # 웹 전용 상태: Google Sheet
@@ -405,82 +410,224 @@ df["진행상태"] = df["번호"].apply(
 )
 
 # -------------------------
-# AS 신청서 생성 (진행상태 기준)
+# AS 신청서 생성 (진행상태 기준 / 기존 양식 재현)
 # -------------------------
-def build_as_request_docx(source_df, selected_statuses):
-    """선택한 진행상태의 항목으로 AS 신청서 Word 파일을 만든다."""
+def infer_trade(part_text, type_text=""):
+    """기존 AS 신청서의 공종 표기 방식에 맞춰 부위 중심으로 공종을 추정한다."""
+    part = str(part_text or "").strip()
+    type_value = str(type_text or "").strip()
+    combined = f"{part} {type_value}"
+
+    trade_rules = [
+        (["벽도배", "천정도배", "도배"], "도배"),
+        (["벽도장", "문틀도장", "도장"], "도장"),
+        (["마루"], "마루"),
+        (["코킹"], "코킹"),
+        (["바닥타일", "벽타일", "타일"], "타일"),
+        (["스위치", "콘센트", "조명", "전등", "전기"], "전기"),
+        (["설비", "배수", "하수구", "수전", "양변기", "세면기"], "설비"),
+        (["목문", "목문틀", "문틀", "창문", "창", "신발장", "수납장", "하부장", "상부장", "서랍장", "냉장고장", "가구", "몰딩"], "목공"),
+    ]
+    for keywords, trade in trade_rules:
+        if any(keyword in combined for keyword in keywords):
+            return trade
+    return "기타"
+
+
+def _set_cell_text(cell, text, bold=False, font_size=9, align=WD_ALIGN_PARAGRAPH.CENTER):
+    cell.text = ""
+    p = cell.paragraphs[0]
+    p.alignment = align
+    run = p.add_run(str(text or ""))
+    run.bold = bold
+    run.font.size = Pt(font_size)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    return p
+
+
+def _set_cell_width(cell, width_cm):
+    cell.width = Cm(width_cm)
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = tc_pr.first_child_found_in("w:tcW")
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+    tc_w.set(qn("w:w"), str(int(Cm(width_cm).emu / 635)))
+    tc_w.set(qn("w:type"), "dxa")
+
+
+
+
+def _set_table_fixed_widths(table, widths_cm):
+    table.autofit = False
+    tbl_pr = table._tbl.tblPr
+    layout = tbl_pr.first_child_found_in("w:tblLayout")
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+    grid_cols = table._tbl.tblGrid.gridCol_lst
+    for idx, width_cm in enumerate(widths_cm):
+        width_twips = int(Cm(width_cm).emu / 635)
+        if idx < len(grid_cols):
+            grid_cols[idx].set(qn("w:w"), str(width_twips))
+        if idx < len(table.columns):
+            table.columns[idx].width = Cm(width_cm)
+        for row in table.rows:
+            if idx < len(row.cells):
+                _set_cell_width(row.cells[idx], width_cm)
+
+def _prevent_row_split(row):
+    tr_pr = row._tr.get_or_add_trPr()
+    cant_split = OxmlElement("w:cantSplit")
+    tr_pr.append(cant_split)
+
+
+def _repeat_table_header(row):
+    tr_pr = row._tr.get_or_add_trPr()
+    tbl_header = OxmlElement("w:tblHeader")
+    tbl_header.set(qn("w:val"), "true")
+    tr_pr.append(tbl_header)
+
+
+def _collect_item_images(row, item_id):
+    images = []
+    file_name = str(row.get("저장된사진파일명", "") or "").strip()
+    if file_name:
+        candidates = [file_name, os.path.basename(file_name)]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                try:
+                    with open(candidate, "rb") as f:
+                        images.append(f.read())
+                    break
+                except Exception:
+                    pass
+
+    for web_img in web_images_map.get(item_id, []):
+        data = web_img.get("data")
+        if data:
+            images.append(data)
+    return images
+
+
+def build_as_request_docx(
+    source_df,
+    selected_statuses,
+    as_date="",
+    manager_name="",
+    message="",
+    building="204동",
+    unit="4503호",
+    phone="",
+):
+    """첨부된 기존 A/S 신청서와 유사한 표 형식으로 Word 신청서를 생성한다."""
     selected = source_df[source_df["진행상태"].isin(selected_statuses)].copy()
 
     doc = Document()
     section = doc.sections[0]
-    section.top_margin = Inches(0.55)
-    section.bottom_margin = Inches(0.55)
-    section.left_margin = Inches(0.6)
-    section.right_margin = Inches(0.6)
+    # 원본 신청서: Letter 용지, 약 1.59cm 여백
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Cm(1.59)
+    section.bottom_margin = Cm(1.59)
+    section.left_margin = Cm(1.59)
+    section.right_margin = Cm(1.59)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "맑은 고딕"
+    normal.font.size = Pt(9)
 
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("해링턴 플레이스 AS 신청서")
-    run.bold = True
-    run.font.size = Pt(18)
+    title.paragraph_format.space_after = Pt(8)
+    title_run = title.add_run("A/S 신청서")
+    title_run.bold = True
+    title_run.font.size = Pt(18)
 
-    meta = doc.add_paragraph()
-    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta.add_run(
-        f"출력 기준: 진행상태 ({', '.join(selected_statuses)})  |  "
-        f"대상 {len(selected)}건  |  생성일 {datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')}"
-    )
+    meta_table = doc.add_table(rows=2, cols=3)
+    meta_table.style = "Table Grid"
+    meta_widths = [3.88, 3.88, 10.65]
+    _set_table_fixed_widths(meta_table, meta_widths)
+    for idx, label in enumerate(["날짜", "매니저명", "전달사항"]):
+        _set_cell_text(meta_table.cell(0, idx), label, bold=True)
+    default_msg = f"{', '.join(selected_statuses)} 하자 {len(selected)}건 A/S 요청드립니다."
+    _set_cell_text(meta_table.cell(1, 0), as_date or datetime.now(ZoneInfo("Asia/Seoul")).strftime("%m/%d"))
+    _set_cell_text(meta_table.cell(1, 1), manager_name)
+    _set_cell_text(meta_table.cell(1, 2), message or default_msg)
 
-    doc.add_paragraph("※ AS 신청 대상은 진행상태를 기준으로 선정되었습니다.")
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+    info_table = doc.add_table(rows=2, cols=6)
+    info_table.style = "Table Grid"
+    info_widths = [3.88, 1.86, 1.33, 1.33, 1.33, 8.75]
+    labels = ["동", "호", "임시\n키불", "키불출", "입주", "전화"]
+    values = [building, unit, "", "", "", phone]
+    _set_table_fixed_widths(info_table, info_widths)
+    for idx, label in enumerate(labels):
+        _set_cell_text(info_table.cell(0, idx), label, bold=True, font_size=8 if idx in [2, 3, 4] else 9)
+        _set_cell_text(info_table.cell(1, idx), values[idx])
+
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+    defect_table = doc.add_table(rows=1, cols=4)
+    defect_table.style = "Table Grid"
+    defect_widths = [1.23, 2.47, 12.24, 2.47]
+    _set_table_fixed_widths(defect_table, defect_widths)
+    header = defect_table.rows[0]
+    _repeat_table_header(header)
+    for idx, label in enumerate(["NO", "실", "내용", "공종"]):
+        _set_cell_text(header.cells[idx], label, bold=True)
 
     if selected.empty:
-        doc.add_paragraph("선택한 진행상태에 해당하는 하자 항목이 없습니다.")
+        row_cells = defect_table.add_row().cells
+        for c, w in zip(row_cells, defect_widths):
+            _set_cell_width(c, w)
+        row_cells[0].merge(row_cells[3])
+        _set_cell_text(row_cells[0], "선택한 진행상태에 해당하는 하자 항목이 없습니다.")
     else:
         for seq, (_, row) in enumerate(selected.iterrows(), start=1):
-            item_id = str(row.get("번호", "")).strip()
-            space_text = str(row.get("공간", "") or "")
-            part_text = str(row.get("부위", "") or "")
-            type_text = str(row.get("유형", "") or "")
-            detail_text = str(row.get("상세내용", "") or "")
-            web_status = str(row.get("진행상태", "") or "")
+            item_id = str(row.get("번호", "") or "").strip()
+            space_text = str(row.get("공간", "") or "").strip()
+            part_text = str(row.get("부위", "") or "").strip()
+            type_text = str(row.get("유형", "") or "").strip()
+            detail_text = str(row.get("상세내용", "") or "").strip()
+            trade = infer_trade(part_text, type_text)
 
-            heading = doc.add_paragraph()
-            r = heading.add_run(f"{seq}. [{item_id}] {space_text} - {part_text}")
-            r.bold = True
-            r.font.size = Pt(12)
+            defect_row = defect_table.add_row()
+            _prevent_row_split(defect_row)
+            cells = defect_row.cells
+            for c, w in zip(cells, defect_widths):
+                _set_cell_width(c, w)
+            _set_cell_text(cells[0], seq)
+            _set_cell_text(cells[1], space_text)
+            _set_cell_text(cells[3], trade)
 
-            table = doc.add_table(rows=4, cols=2)
-            table.style = "Table Grid"
-            fields = [
-                ("진행상태", web_status),
-                ("공간 / 부위", f"{space_text} / {part_text}"),
-                ("유형", type_text),
-                ("상세내용", detail_text),
-            ]
-            for idx, (label, value) in enumerate(fields):
-                table.cell(idx, 0).text = label
-                table.cell(idx, 1).text = value
+            cells[2].text = ""
+            cells[2].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            text_p = cells[2].paragraphs[0]
+            text_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            text_p.paragraph_format.space_after = Pt(2)
+            text_run = text_p.add_run(f"{space_text} {part_text} / {type_text} - {detail_text}")
+            text_run.font.size = Pt(9)
 
-            # 기존 Excel 사진 + 웹 신규등록 사진 모두 출력
-            file_name = str(row.get("저장된사진파일명", "") or "").strip()
-            if file_name and os.path.exists(file_name):
-                try:
-                    p_img = doc.add_paragraph()
-                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    p_img.add_run().add_picture(file_name, width=Inches(4.8))
-                except Exception:
-                    doc.add_paragraph(f"사진 파일: {file_name}")
-
-            for web_img in web_images_map.get(item_id, []):
-                try:
-                    p_img = doc.add_paragraph()
-                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    p_img.add_run().add_picture(io.BytesIO(web_img["data"]), width=Inches(4.8))
-                except Exception:
-                    pass
-
-            if seq != len(selected):
-                doc.add_paragraph("―" * 35)
+            images = _collect_item_images(row, item_id)
+            if images:
+                for img_bytes in images:
+                    try:
+                        img_p = cells[2].add_paragraph()
+                        img_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        img_p.paragraph_format.space_before = Pt(1)
+                        img_p.paragraph_format.space_after = Pt(1)
+                        img_p.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(8.15))
+                    except Exception:
+                        pass
+            else:
+                no_img = cells[2].add_paragraph()
+                no_img.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                r = no_img.add_run("(사진 없음)")
+                r.font.size = Pt(8)
 
     output = io.BytesIO()
     doc.save(output)
@@ -551,46 +698,20 @@ else:
 with st.expander("➕ 새 하자 등록", expanded=False):
     st.caption(
         "새 항목은 Excel을 수정하지 않고 Google Sheet에 별도로 저장됩니다. "
-        "공간 → 부위 → 유형은 원본 Excel에 실제 등록된 조합만 선택할 수 있으며 사진은 최대 5장까지 첨부할 수 있습니다."
+        "공간·부위·유형은 원본 Excel에 있는 전체 목록에서 각각 독립적으로 선택하며 사진은 최대 5장까지 첨부할 수 있습니다."
     )
 
-    if not REFERENCE_SPACES:
+    if not REFERENCE_SPACES or not REFERENCE_PARTS or not REFERENCE_TYPES:
         st.error("원본 Excel에서 공간/부위/유형 기준값을 읽지 못했습니다.")
         new_space = new_part = new_type = ""
     else:
-        new_space = st.selectbox(
-            "공간 *",
-            REFERENCE_SPACES,
-            key="new_issue_space",
-        )
-
-        part_options = sorted(
-            REFERENCE_DF.loc[REFERENCE_DF["공간"] == new_space, "부위"]
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        new_part = st.selectbox(
-            "부위 *",
-            part_options,
-            key="new_issue_part",
-        ) if part_options else ""
-
-        type_options = sorted(
-            REFERENCE_DF.loc[
-                (REFERENCE_DF["공간"] == new_space) & (REFERENCE_DF["부위"] == new_part),
-                "유형",
-            ]
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        type_options = [x for x in type_options if str(x).strip()]
-        new_type = st.selectbox(
-            "유형 *",
-            type_options,
-            key="new_issue_type",
-        ) if type_options else ""
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            new_space = st.selectbox("공간 *", REFERENCE_SPACES, key="new_issue_space")
+        with c2:
+            new_part = st.selectbox("부위 *", REFERENCE_PARTS, key="new_issue_part")
+        with c3:
+            new_type = st.selectbox("유형 *", REFERENCE_TYPES, key="new_issue_type")
 
     c_status, c_info = st.columns([1, 2])
     with c_status:
@@ -602,7 +723,7 @@ with st.expander("➕ 새 하자 등록", expanded=False):
         )
     with c_info:
         st.info(
-            f"선택 기준: {new_space or '-'} → {new_part or '-'} → {new_type or '-'}",
+            f"선택: {new_space or '-'} / {new_part or '-'} / {new_type or '-'}",
             icon="📌",
         )
 
@@ -659,7 +780,11 @@ with st.expander("➕ 새 하자 등록", expanded=False):
 
 # AS 신청서 출력: 진행상태 기준
 with st.expander("📝 AS 신청서 출력", expanded=False):
-    st.caption("AS 신청 대상은 아래에서 선택한 **진행상태** 기준으로 생성됩니다.")
+    st.caption(
+        "첨부해주신 기존 A/S 신청서처럼 `날짜/매니저명/전달사항`, 세대정보, "
+        "`NO/실/내용/공종` 표와 사진이 함께 출력됩니다."
+    )
+
     as_statuses = st.multiselect(
         "출력할 진행상태",
         WEB_STATUS_OPTIONS,
@@ -667,14 +792,40 @@ with st.expander("📝 AS 신청서 출력", expanded=False):
         key="as_web_statuses",
     )
 
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        as_date = st.text_input(
+            "날짜",
+            value=datetime.now(ZoneInfo("Asia/Seoul")).strftime("%m/%d"),
+            key="as_date",
+        )
+        as_building = st.text_input("동", value="204동", key="as_building")
+    with c2:
+        as_manager = st.text_input("매니저명", value="", key="as_manager")
+        as_unit = st.text_input("호", value="4503호", key="as_unit")
+    with c3:
+        as_phone = st.text_input("전화", value="", key="as_phone")
+
+    as_target_count = int(df["진행상태"].isin(as_statuses).sum()) if as_statuses else 0
+    default_message = f"{', '.join(as_statuses)} 하자 {as_target_count}건 A/S 요청드립니다." if as_statuses else ""
+    as_message = st.text_input("전달사항", value=default_message, key="as_message")
+
     if as_statuses:
-        as_target_count = int(df["진행상태"].isin(as_statuses).sum())
         st.info(f"현재 AS 신청서 출력 대상: {as_target_count}건")
-        as_docx_bytes, _ = build_as_request_docx(df, as_statuses)
+        as_docx_bytes, _ = build_as_request_docx(
+            df,
+            as_statuses,
+            as_date=as_date,
+            manager_name=as_manager,
+            message=as_message,
+            building=as_building,
+            unit=as_unit,
+            phone=as_phone,
+        )
         st.download_button(
             "📄 AS 신청서 다운로드 (.docx)",
             data=as_docx_bytes,
-            file_name=f"AS신청서_진행상태_{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d_%H%M')}.docx",
+            file_name=f"AS신청서_{datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y%m%d_%H%M')}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
