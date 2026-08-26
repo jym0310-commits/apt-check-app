@@ -457,14 +457,9 @@ if not st.session_state.logged_in_unit:
             _has_custom_pin = unit_has_pin(pending_building, pending_unit)
         except Exception:
             _has_custom_pin = False
-        if _has_custom_pin:
-            st.caption("변경한 PIN을 입력해 주세요.")
-            _pin_placeholder = "변경한 4자리 PIN"
-        else:
-            st.caption("최초 접속은 초기 PIN(동+호수 숫자)을 입력해 주세요. 로그인 후 새 PIN으로 변경합니다.")
-            _pin_placeholder = f"예: {get_initial_pin(pending_building, pending_unit)}"
+        # 로그인 화면에는 초기/변경 PIN 규칙이나 예시를 노출하지 않습니다.
         with st.form("unit_pin_login_form"):
-            login_pin = st.text_input("PIN", type="password", placeholder=_pin_placeholder, max_chars=12)
+            login_pin = st.text_input("PIN", type="password", max_chars=12)
             pin_submit = st.form_submit_button("로그인", use_container_width=True, type="primary")
         if st.button("다른 동·호수 입력", use_container_width=True):
             st.session_state.pop("pending_login_building", None)
