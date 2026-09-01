@@ -1438,7 +1438,7 @@ st.markdown(
 web_added_count = int((df["데이터출처"] == "웹등록").sum())
 st.caption(f"웹에서 추가한 하자 {web_added_count}건 · 진행상태는 미완료 / 확인완료 두 단계로 관리합니다.")
 
-st.markdown('<div class="section-label">공간별 진행현황</div><div class="section-caption">미완료 항목이 많은 공간부터 표시합니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-label">공간별 진행현황</div><div class="section-caption">숫자를 누르면 아래 하자 목록이 해당 조건으로 바로 필터링됩니다.</div>', unsafe_allow_html=True)
 if df.empty:
     st.info("표시할 하자 데이터가 없습니다.")
 else:
@@ -1458,12 +1458,54 @@ else:
     )
     # 미완료가 많은 공간을 먼저 확인할 수 있도록 미완료 내림차순, 진행률 오름차순으로 정렬
     space_summary = space_summary.sort_values(["미완료", "진행률값", "전체"], ascending=[False, True, False])
-    space_summary["진행률"] = space_summary["진행률값"].astype(str) + "%"
-    st.dataframe(
-        space_summary[["공간", "전체", "확인완료", "미완료", "진행률"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+
+    # 하자 목록의 수동 필터와 같은 session_state를 사용해 클릭 필터와 자연스럽게 연동합니다.
+    if "issue_space_filter" not in st.session_state:
+        st.session_state["issue_space_filter"] = "전체"
+    if "issue_progress_filter" not in st.session_state:
+        st.session_state["issue_progress_filter"] = "전체"
+
+    h_space, h_total, h_done, h_incomplete, h_rate = st.columns([1.25, 1, 1, 1, 0.9])
+    h_space.markdown("**공간**")
+    h_total.markdown("**전체**")
+    h_done.markdown("**확인완료**")
+    h_incomplete.markdown("**미완료**")
+    h_rate.markdown("**진행률**")
+
+    for _, summary_row in space_summary.iterrows():
+        summary_space = str(summary_row["공간"])
+        safe_key = hashlib.sha1(summary_space.encode("utf-8")).hexdigest()[:10]
+        c_space, c_total, c_done, c_incomplete, c_rate = st.columns([1.25, 1, 1, 1, 0.9])
+        c_space.markdown(f"**{html.escape(summary_space)}**")
+
+        if c_total.button(str(int(summary_row["전체"])), key=f"space_total_{safe_key}", use_container_width=True):
+            st.session_state["issue_space_filter"] = summary_space
+            st.session_state["issue_progress_filter"] = "전체"
+            st.rerun()
+        if c_done.button(str(int(summary_row["확인완료"])), key=f"space_done_{safe_key}", use_container_width=True, disabled=int(summary_row["확인완료"]) == 0):
+            st.session_state["issue_space_filter"] = summary_space
+            st.session_state["issue_progress_filter"] = "확인완료"
+            st.rerun()
+        if c_incomplete.button(str(int(summary_row["미완료"])), key=f"space_incomplete_{safe_key}", use_container_width=True, disabled=int(summary_row["미완료"]) == 0):
+            st.session_state["issue_space_filter"] = summary_space
+            st.session_state["issue_progress_filter"] = "미완료"
+            st.rerun()
+        c_rate.markdown(f"**{int(summary_row['진행률값'])}%**")
+
+    selected_space_now = st.session_state.get("issue_space_filter", "전체")
+    selected_progress_now = st.session_state.get("issue_progress_filter", "전체")
+    if selected_space_now != "전체" or selected_progress_now != "전체":
+        label_parts = []
+        if selected_space_now != "전체":
+            label_parts.append(selected_space_now)
+        if selected_progress_now != "전체":
+            label_parts.append(selected_progress_now)
+        info_col, clear_col = st.columns([4, 1])
+        info_col.info(f"현재 빠른 필터: {' · '.join(label_parts)}")
+        if clear_col.button("필터 해제", key="clear_space_summary_filter", use_container_width=True):
+            st.session_state["issue_space_filter"] = "전체"
+            st.session_state["issue_progress_filter"] = "전체"
+            st.rerun()
 
 # -------------------------
 # 웹 신규 하자 등록
@@ -1623,12 +1665,21 @@ with st.expander("공간 위치 확인 (평면도)"):
 
 filter_col1, filter_col2 = st.columns(2)
 
+spaces = sorted([str(x) for x in df["공간"].dropna().unique().tolist()])
+space_options = ["전체"] + spaces
+progress_options = ["전체"] + WEB_STATUS_OPTIONS
+
+# 데이터 변경으로 기존 선택값이 사라진 경우 안전하게 전체로 되돌립니다.
+if st.session_state.get("issue_space_filter", "전체") not in space_options:
+    st.session_state["issue_space_filter"] = "전체"
+if st.session_state.get("issue_progress_filter", "전체") not in progress_options:
+    st.session_state["issue_progress_filter"] = "전체"
+
 with filter_col1:
-    spaces = sorted([str(x) for x in df["공간"].dropna().unique().tolist()])
-    space = st.selectbox("공간별 필터링", ["전체"] + spaces)
+    space = st.selectbox("공간별 필터링", space_options, key="issue_space_filter")
 
 with filter_col2:
-    progress_filter = st.selectbox("진행상태", ["전체"] + WEB_STATUS_OPTIONS)
+    progress_filter = st.selectbox("진행상태", progress_options, key="issue_progress_filter")
 
 target_df = df.copy()
 if space != "전체":
