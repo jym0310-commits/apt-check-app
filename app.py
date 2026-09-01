@@ -1499,35 +1499,46 @@ else:
                 f"미완료 {incomplete_count}",
             ]
 
+            # 카드의 빠른 필터는 콜백으로 적용합니다.
+            # 선택값을 유지하는 pills/radio와 st.rerun()을 같이 쓰면 모바일에서
+            # rerun이 반복되어 하자 목록까지 렌더링되지 않는 문제가 생길 수 있습니다.
+            def _apply_space_quick_filter(widget_key, target_space, done_n, incomplete_n):
+                picked_value = st.session_state.get(widget_key)
+                if not picked_value:
+                    return
+                if str(picked_value).startswith("전체"):
+                    st.session_state["issue_space_filter"] = target_space
+                    st.session_state["issue_progress_filter"] = "전체"
+                elif str(picked_value).startswith("확인완료") and done_n > 0:
+                    st.session_state["issue_space_filter"] = target_space
+                    st.session_state["issue_progress_filter"] = "확인완료"
+                elif str(picked_value).startswith("미완료") and incomplete_n > 0:
+                    st.session_state["issue_space_filter"] = target_space
+                    st.session_state["issue_progress_filter"] = "미완료"
+
             if hasattr(st, "pills"):
-                picked = st.pills(
+                widget_key = f"space_pills_{safe_key}"
+                st.pills(
                     "빠른 필터",
                     pill_options,
                     selection_mode="single",
-                    key=f"space_pills_{safe_key}",
+                    key=widget_key,
                     label_visibility="collapsed",
+                    on_change=_apply_space_quick_filter,
+                    args=(widget_key, summary_space, done_count, incomplete_count),
                 )
             else:
-                picked = st.radio(
+                widget_key = f"space_radio_{safe_key}"
+                st.radio(
                     "빠른 필터",
                     pill_options,
                     horizontal=True,
-                    key=f"space_radio_{safe_key}",
+                    key=widget_key,
                     label_visibility="collapsed",
                     index=None,
+                    on_change=_apply_space_quick_filter,
+                    args=(widget_key, summary_space, done_count, incomplete_count),
                 )
-
-            if picked:
-                if picked.startswith("전체"):
-                    st.session_state["issue_space_filter"] = summary_space
-                    st.session_state["issue_progress_filter"] = "전체"
-                elif picked.startswith("확인완료") and done_count > 0:
-                    st.session_state["issue_space_filter"] = summary_space
-                    st.session_state["issue_progress_filter"] = "확인완료"
-                elif picked.startswith("미완료") and incomplete_count > 0:
-                    st.session_state["issue_space_filter"] = summary_space
-                    st.session_state["issue_progress_filter"] = "미완료"
-                st.rerun()
 
     selected_space_now = st.session_state.get("issue_space_filter", "전체")
     selected_progress_now = st.session_state.get("issue_progress_filter", "전체")
