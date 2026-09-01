@@ -1,6 +1,7 @@
 import base64
 import glob
 import hashlib
+import hmac
 import secrets as pysecrets
 import html
 import io
@@ -9,12 +10,13 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
 import pandas as pd
 import streamlit as st
+import extra_streamlit_components as stx
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -43,6 +45,8 @@ LEGACY_BUILDING = "204동"
 LEGACY_UNIT = "4503호"
 MAX_ACTIVE_UNITS = 100
 SESSION_IDLE_TIMEOUT_SECONDS = 10 * 60
+AUTH_COOKIE_NAME = "apt_check_unit_auth"
+AUTH_COOKIE_DAYS = 7
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -395,6 +399,89 @@ def admin_password_ok(password):
     return pysecrets.compare_digest(str(password), configured)
 
 
+def _login_cookie_secret():
+    # 별도 비밀키가 있으면 우선 사용하고, 없으면 기존 관리자 비밀번호를 사용합니다.
+    return str(auth_get_secret("LOGIN_COOKIE_SECRET", "") or auth_get_secret("ADMIN_PASSWORD", "") or "")
+
+
+def _unit_auth_fingerprint(building, unit):
+    """현재 변경 PIN과 연결된 토큰 지문. PIN 변경/초기화 시 기존 쿠키가 자동 무효화됩니다."""
+    rec = load_unit_accounts().get(f"{building}|{unit}")
+    if not rec or rec.get("pin_mode") != "custom" or not rec.get("pin_hash"):
+        return ""
+    raw = f"{building}|{unit}|{rec.get('pin_hash')}|custom"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _make_login_token(building, unit):
+    secret = _login_cookie_secret()
+    fingerprint = _unit_auth_fingerprint(building, unit)
+    if not secret or not fingerprint:
+        return ""
+    payload = {
+        "b": building,
+        "u": unit,
+        "exp": int(time.time()) + AUTH_COOKIE_DAYS * 24 * 60 * 60,
+        "fp": fingerprint,
+    }
+    raw_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = base64.urlsafe_b64encode(raw_json).decode("ascii").rstrip("=")
+    sig = hmac.new(secret.encode("utf-8"), raw.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{raw}.{sig}"
+
+
+def _verify_login_token(token):
+    secret = _login_cookie_secret()
+    if not secret or not token or "." not in str(token):
+        return None
+    try:
+        raw, sig = str(token).rsplit(".", 1)
+        expected = hmac.new(secret.encode("utf-8"), raw.encode("ascii"), hashlib.sha256).hexdigest()
+        if not pysecrets.compare_digest(sig, expected):
+            return None
+        padded = raw + "=" * (-len(raw) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        building = normalize_building(payload.get("b", ""))
+        unit = normalize_unit(payload.get("u", ""))
+        if not building or not unit:
+            return None
+        current_fp = _unit_auth_fingerprint(building, unit)
+        if not current_fp or not pysecrets.compare_digest(str(payload.get("fp", "")), current_fp):
+            return None
+        return building, unit
+    except Exception:
+        return None
+
+
+def get_cookie_manager():
+    return stx.CookieManager(key="apt_check_cookie_manager")
+
+
+def set_login_cookie(cookie_manager, building, unit):
+    token = _make_login_token(building, unit)
+    if not token:
+        return False
+    cookie_manager.set(
+        AUTH_COOKIE_NAME,
+        token,
+        expires_at=datetime.now() + timedelta(days=AUTH_COOKIE_DAYS),
+        key="set_apt_check_auth",
+        path="/",
+        same_site="lax",
+        secure=True,
+    )
+    return True
+
+
+def clear_login_cookie(cookie_manager):
+    try:
+        cookie_manager.delete(AUTH_COOKIE_NAME, key="delete_apt_check_auth")
+    except Exception:
+        pass
+
+
 @st.cache_resource
 def get_active_unit_registry():
     # Streamlit 프로세스 내에서 공유되는 경량 활성 세대 레지스트리입니다.
@@ -444,8 +531,32 @@ def release_active_unit(building, unit):
         registry["units"].pop(unit_key, None)
 
 
+COOKIE_MANAGER = get_cookie_manager()
+
 if "logged_in_unit" not in st.session_state:
     st.session_state.logged_in_unit = False
+
+# 모바일 브라우저가 Streamlit 세션을 잃어도 7일 쿠키가 유효하면 자동 로그인합니다.
+if not st.session_state.logged_in_unit and not st.session_state.get("pending_login_building"):
+    try:
+        _saved_token = COOKIE_MANAGER.get(AUTH_COOKIE_NAME)
+    except Exception:
+        _saved_token = None
+    if _saved_token:
+        _restored = _verify_login_token(_saved_token)
+        if _restored:
+            _rb, _ru = _restored
+            _admitted, _active_count = claim_active_unit(_rb, _ru)
+            if _admitted:
+                st.session_state.logged_in_unit = True
+                st.session_state.login_building = _rb
+                st.session_state.login_unit = _ru
+                st.session_state.pin_change_required = False
+                st.session_state.cookie_auto_login = True
+            else:
+                st.session_state.cookie_capacity_blocked = True
+        else:
+            clear_login_cookie(COOKIE_MANAGER)
 
 if not st.session_state.logged_in_unit:
     pending_building = st.session_state.get("pending_login_building")
@@ -500,6 +611,9 @@ if not st.session_state.logged_in_unit:
                     st.session_state.pin_change_required = _logged_in_with_initial_pin
                     st.session_state.pop("pending_login_building", None)
                     st.session_state.pop("pending_login_unit", None)
+                    # 변경 PIN으로 로그인한 경우에만 7일 로그인 쿠키를 발급합니다.
+                    if not _logged_in_with_initial_pin:
+                        set_login_cookie(COOKIE_MANAGER, pending_building, pending_unit)
                     st.rerun()
     else:
         with st.form("unit_login_form"):
@@ -605,11 +719,13 @@ if st.session_state.get("pin_change_required", False):
                 save_unit_pin(CURRENT_BUILDING, CURRENT_UNIT, new_pin1)
                 st.session_state.pin_change_required = False
                 st.session_state.pop("pin_reset_login", None)
+                set_login_cookie(COOKIE_MANAGER, CURRENT_BUILDING, CURRENT_UNIT)
                 st.success("새 PIN이 저장되었습니다.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"PIN 저장에 실패했습니다: {exc}")
     if st.button("로그아웃", key="forced_pin_logout", use_container_width=True):
+        clear_login_cookie(COOKIE_MANAGER)
         release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
         for key in ["logged_in_unit", "login_building", "login_unit", "pending_login_building", "pending_login_unit", "pin_change_required"]:
             st.session_state.pop(key, None)
@@ -641,6 +757,7 @@ with st.sidebar:
                 else:
                     try:
                         save_unit_pin(CURRENT_BUILDING, CURRENT_UNIT, pin1)
+                        set_login_cookie(COOKIE_MANAGER, CURRENT_BUILDING, CURRENT_UNIT)
                         st.success("새 PIN이 설정되었습니다. 다음 로그인부터 변경한 PIN을 입력해 주세요.")
                         st.rerun()
                     except Exception as exc:
@@ -662,6 +779,7 @@ with st.sidebar:
                 else:
                     try:
                         save_unit_pin(CURRENT_BUILDING, CURRENT_UNIT, new_pin1)
+                        set_login_cookie(COOKIE_MANAGER, CURRENT_BUILDING, CURRENT_UNIT)
                         st.success("PIN이 변경되었습니다.")
                         st.rerun()
                     except Exception as exc:
@@ -689,6 +807,8 @@ with st.sidebar:
             else:
                 try:
                     if reset_unit_pin(target_b, target_u):
+                        if target_b == CURRENT_BUILDING and target_u == CURRENT_UNIT:
+                            clear_login_cookie(COOKIE_MANAGER)
                         st.success(f"{target_b} {target_u} PIN을 초기화했습니다.")
                     else:
                         st.info("해당 세대에 설정된 PIN 계정을 찾지 못했습니다.")
@@ -696,6 +816,7 @@ with st.sidebar:
                     st.error(f"PIN 초기화에 실패했습니다: {exc}")
 
     if st.button("로그아웃", use_container_width=True):
+        clear_login_cookie(COOKIE_MANAGER)
         release_active_unit(CURRENT_BUILDING, CURRENT_UNIT)
         for key in ["logged_in_unit", "login_building", "login_unit", "pending_login_building", "pending_login_unit", "pin_change_required"]:
             st.session_state.pop(key, None)
