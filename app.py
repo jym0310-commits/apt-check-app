@@ -172,12 +172,22 @@ st.markdown(
     [data-testid="stAlert"] { border-radius:12px !important; box-shadow:none !important; }
     hr { border:none !important; border-top:1px solid var(--line) !important; margin:40px 0 !important; }
 
+    .space-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    .space-card-title { font-size:16px; font-weight:700; color:var(--ink); letter-spacing:-.02em; }
+    .space-card-rate { font-size:15px; font-weight:700; color:var(--ink); }
+    .space-card-track { width:100%; height:7px; background:#eeeeee; border-radius:999px; overflow:hidden; margin-bottom:12px; }
+    .space-card-fill { height:100%; background:var(--ink); border-radius:999px; }
+    div[data-testid="stPills"] button { min-height:36px !important; font-weight:650 !important; }
+
     @media (max-width: 760px) {
         .block-container { padding: 3.6rem 1rem 4rem 1rem; }
         .app-nav { padding-bottom:18px; margin-bottom:10px; }
         .hero { padding:20px 0 24px 0; }
         .hero-title, .login-title { font-size:28px; }
         .kpi-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+        .space-card-title { font-size:15px; }
+        .space-card-rate { font-size:14px; }
+        div[data-testid="stPills"] { overflow-x:auto; padding-bottom:2px; }
         .unit-pill { font-size:12px; padding:7px 11px; }
     }
     </style>
@@ -1465,32 +1475,59 @@ else:
     if "issue_progress_filter" not in st.session_state:
         st.session_state["issue_progress_filter"] = "전체"
 
-    h_space, h_total, h_done, h_incomplete, h_rate = st.columns([1.25, 1, 1, 1, 0.9])
-    h_space.markdown("**공간**")
-    h_total.markdown("**전체**")
-    h_done.markdown("**확인완료**")
-    h_incomplete.markdown("**미완료**")
-    h_rate.markdown("**진행률**")
-
     for _, summary_row in space_summary.iterrows():
         summary_space = str(summary_row["공간"])
         safe_key = hashlib.sha1(summary_space.encode("utf-8")).hexdigest()[:10]
-        c_space, c_total, c_done, c_incomplete, c_rate = st.columns([1.25, 1, 1, 1, 0.9])
-        c_space.markdown(f"**{html.escape(summary_space)}**")
+        total_count = int(summary_row["전체"])
+        done_count = int(summary_row["확인완료"])
+        incomplete_count = int(summary_row["미완료"])
+        progress_rate = int(summary_row["진행률값"])
 
-        if c_total.button(str(int(summary_row["전체"])), key=f"space_total_{safe_key}", use_container_width=True):
-            st.session_state["issue_space_filter"] = summary_space
-            st.session_state["issue_progress_filter"] = "전체"
-            st.rerun()
-        if c_done.button(str(int(summary_row["확인완료"])), key=f"space_done_{safe_key}", use_container_width=True, disabled=int(summary_row["확인완료"]) == 0):
-            st.session_state["issue_space_filter"] = summary_space
-            st.session_state["issue_progress_filter"] = "확인완료"
-            st.rerun()
-        if c_incomplete.button(str(int(summary_row["미완료"])), key=f"space_incomplete_{safe_key}", use_container_width=True, disabled=int(summary_row["미완료"]) == 0):
-            st.session_state["issue_space_filter"] = summary_space
-            st.session_state["issue_progress_filter"] = "미완료"
-            st.rerun()
-        c_rate.markdown(f"**{int(summary_row['진행률값'])}%**")
+        with st.container(border=True):
+            st.markdown(
+                f'''<div class="space-card-head">
+                    <div class="space-card-title">{html.escape(summary_space)}</div>
+                    <div class="space-card-rate">{progress_rate}%</div>
+                </div>
+                <div class="space-card-track"><div class="space-card-fill" style="width:{progress_rate}%"></div></div>''',
+                unsafe_allow_html=True,
+            )
+
+            pill_options = [
+                f"전체 {total_count}",
+                f"확인완료 {done_count}",
+                f"미완료 {incomplete_count}",
+            ]
+
+            if hasattr(st, "pills"):
+                picked = st.pills(
+                    "빠른 필터",
+                    pill_options,
+                    selection_mode="single",
+                    key=f"space_pills_{safe_key}",
+                    label_visibility="collapsed",
+                )
+            else:
+                picked = st.radio(
+                    "빠른 필터",
+                    pill_options,
+                    horizontal=True,
+                    key=f"space_radio_{safe_key}",
+                    label_visibility="collapsed",
+                    index=None,
+                )
+
+            if picked:
+                if picked.startswith("전체"):
+                    st.session_state["issue_space_filter"] = summary_space
+                    st.session_state["issue_progress_filter"] = "전체"
+                elif picked.startswith("확인완료") and done_count > 0:
+                    st.session_state["issue_space_filter"] = summary_space
+                    st.session_state["issue_progress_filter"] = "확인완료"
+                elif picked.startswith("미완료") and incomplete_count > 0:
+                    st.session_state["issue_space_filter"] = summary_space
+                    st.session_state["issue_progress_filter"] = "미완료"
+                st.rerun()
 
     selected_space_now = st.session_state.get("issue_space_filter", "전체")
     selected_progress_now = st.session_state.get("issue_progress_filter", "전체")
